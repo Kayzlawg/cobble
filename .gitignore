@@ -25,3 +25,6 @@ dist-ssr
 
 # sidecar binaries, fetched by setup.ps1
 src-tauri/binaries/
+
+# local notes
+notes/
