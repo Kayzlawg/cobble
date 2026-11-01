@@ -1,0 +1,31 @@
+COBBLE TERMS OF SERVICE
+Last updated November 1, 2026
+The latest version is at https://cobbleapp.ca/terms
+
+AGREEMENT
+
+By using this website or the Cobble app, you agree to these terms. If you do not agree, do not install or use Cobble.
+
+LICENSE
+
+Cobble is open source under the MIT License. The license text is in the LICENSE file of the repository (https://github.com/Kayzlawg/cobble) and covers using, copying, modifying and sharing the code.
+
+YOUR RESPONSIBILITY
+
+You choose what to download. You are responsible for having the right to download it, for following the law where you live and for following the terms of the sites you download from. See https://cobbleapp.ca/responsible-use
+
+THIRD-PARTY TOOLS AND NAMES
+
+Cobble bundles yt-dlp, ffmpeg and Deno, each under its own license. Cobble is not affiliated with or endorsed by any site you can download from. Site and company names are trademarks of their owners.
+
+NO WARRANTY
+
+Cobble is provided as is, without warranty of any kind. Sites change often, so a download that works today may stop working. To the extent the law allows, the author is not liable for any loss or damage that comes from using Cobble or this website.
+
+CHANGES
+
+Features and these terms may change. The date at the top shows when these terms last did.
+
+CONTACT
+
+Open an issue at https://github.com/Kayzlawg/cobble/issues

@@ -26,6 +26,16 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "Cobble",
+    "licenseFile": "windows/terms.txt",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "windows/header.bmp",
+        "sidebarImage": "windows/sidebar.bmp",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    },
     "externalBin": ["binaries/yt-dlp", "binaries/ffmpeg", "binaries/deno"],
     "icon": [
       "icons/32x32.png",
