@@ -19,10 +19,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const NO_WINDOW: u32 = 0x0800_0000;
 
+// One job at a time. The frontend owns the queue and starts the next job when this one finishes.
 #[derive(Default)]
 struct Running {
     child: Mutex<Option<Child>>,
     cancelled: AtomicBool,
+    busy: AtomicBool,
 }
 
 #[derive(Serialize, Clone)]
@@ -37,6 +39,13 @@ struct Stream {
 }
 
 #[derive(Serialize)]
+struct Item {
+    title: String,
+    url: String,
+    duration: Option<f64>,
+}
+
+#[derive(Serialize)]
 struct Info {
     title: String,
     thumbnail: Option<String>,
@@ -44,6 +53,7 @@ struct Info {
     duration: Option<f64>,
     videos: Vec<Stream>,
     audios: Vec<Stream>,
+    entries: Vec<Item>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -52,11 +62,22 @@ struct Request {
     title: String,
     video: Option<String>,
     audio: Option<String>,
+    // A yt-dlp format selector, used instead of video/audio ids (playlists pick by quality, not by stream).
+    #[serde(default)]
+    selector: Option<String>,
     vc: Option<String>,
     ac: Option<String>,
     preset: String,
     duration: Option<f64>,
     label: String,
+}
+
+#[derive(Deserialize)]
+struct CompressReq {
+    path: String,
+    preset: String,
+    codec: String,
+    max_height: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -69,6 +90,8 @@ struct Entry {
     at: u64,
     #[serde(default)]
     req: Option<Request>,
+    #[serde(default)]
+    from_size: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -114,7 +137,7 @@ fn ytdlp(app: &AppHandle) -> Result<Command, String> {
     let ffmpeg_dir = bundled("ffmpeg");
     let mut c = Command::new(ytdlp_path(app)?);
     c.creation_flags(NO_WINDOW)
-        .args(["--no-update", "--no-warnings", "--no-playlist"])
+        .args(["--no-update", "--no-warnings"])
         .arg("--ffmpeg-location")
         .arg(ffmpeg_dir.parent().unwrap())
         .arg("--js-runtimes")
@@ -245,10 +268,15 @@ fn parse_streams(v: &Value) -> (Vec<Stream>, Vec<Stream>) {
     )
 }
 
+// A playlist URL comes back as a list of entries and no formats. With `playlist` false a watch URL that also has
+// a list= parameter is treated as just that one video.
 #[tauri::command]
-async fn fetch_info(app: AppHandle, url: String) -> Result<Info, String> {
+async fn fetch_info(app: AppHandle, url: String, playlist: Option<bool>) -> Result<Info, String> {
     let mut cmd = ytdlp(&app)?;
-    let out = tauri::async_runtime::spawn_blocking(move || cmd.arg("-J").arg(url).output())
+    if playlist != Some(true) {
+        cmd.arg("--no-playlist");
+    }
+    let out = tauri::async_runtime::spawn_blocking(move || cmd.args(["--flat-playlist", "-J"]).arg(url).output())
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
@@ -256,14 +284,31 @@ async fn fetch_info(app: AppHandle, url: String) -> Result<Info, String> {
         return Err(last_error(&String::from_utf8_lossy(&out.stderr)));
     }
     let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    let entries: Vec<Item> = if v["_type"] == "playlist" {
+        v["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                Some(Item {
+                    title: e["title"].as_str().unwrap_or("Untitled").into(),
+                    url: e["url"].as_str().or_else(|| e["webpage_url"].as_str())?.into(),
+                    duration: e["duration"].as_f64(),
+                })
+            })
+            .collect()
+    } else {
+        vec![]
+    };
     let (videos, audios) = parse_streams(&v);
     Ok(Info {
         title: v["title"].as_str().unwrap_or("Untitled").into(),
         thumbnail: v["thumbnail"].as_str().map(Into::into),
-        uploader: v["uploader"].as_str().map(Into::into),
+        uploader: v["uploader"].as_str().or_else(|| v["channel"].as_str()).map(Into::into),
         duration: v["duration"].as_f64(),
         videos,
         audios,
+        entries,
     })
 }
 
@@ -298,7 +343,61 @@ fn convert_plan(preset: &str, vc: Option<&str>, ac: Option<&str>) -> Plan {
 }
 
 fn format_selector(req: &Request) -> String {
-    [req.video.as_deref(), req.audio.as_deref()].into_iter().flatten().collect::<Vec<_>>().join("+")
+    req.selector.clone().unwrap_or_else(|| {
+        [req.video.as_deref(), req.audio.as_deref()].into_iter().flatten().collect::<Vec<_>>().join("+")
+    })
+}
+
+// Runs ffmpeg on `input` into `out`, reporting progress. Removes `out` if it fails or is cancelled.
+fn run_ffmpeg(
+    app: &AppHandle,
+    running: &Running,
+    stage: &'static str,
+    input: &Path,
+    out: &Path,
+    mid: &[&str],
+    duration: Option<f64>,
+) -> Result<(), String> {
+    let mut child = Command::new(bundled("ffmpeg"))
+        .creation_flags(NO_WINDOW)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-i"])
+        .arg(input)
+        .args(mid)
+        .arg(out)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    *running.child.lock().unwrap() = Some(child);
+
+    let err = thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    let total_us = duration.unwrap_or(0.0) * 1e6;
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<f64>().ok()) {
+            if total_us > 0.0 {
+                let percent = (us / total_us * 100.0).clamp(0.0, 100.0);
+                let _ = app.emit("progress", Progress { stage, percent, speed: None, eta: None });
+            }
+        }
+    }
+    let status = running.child.lock().unwrap().take().and_then(|mut c| c.wait().ok());
+    let err = err.join().unwrap_or_default();
+
+    if running.cancelled.load(Ordering::SeqCst) {
+        let _ = fs::remove_file(out);
+        return Err("Cancelled".into());
+    }
+    if !status.is_some_and(|s| s.success()) {
+        let _ = fs::remove_file(out);
+        return Err(err.lines().last().unwrap_or("ffmpeg failed").to_string());
+    }
+    Ok(())
 }
 
 fn convert(app: &AppHandle, running: &Running, req: &Request, src: &Path) -> Result<PathBuf, String> {
@@ -327,132 +426,35 @@ fn convert(app: &AppHandle, running: &Running, req: &Request, src: &Path) -> Res
         (_, "mp3") => &["-c:a", "libmp3lame", "-q:a", "0"],
         _ => &["-c:a", "aac", "-b:a", "256k"],
     };
-    let mut cmd = Command::new(bundled("ffmpeg"));
-    cmd.creation_flags(NO_WINDOW)
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-i"])
-        .arg(src)
-        .args(video)
-        .args(audio);
+    let mut mid: Vec<&str> = [video, audio].concat();
     if matches!(plan.ext, "mp4" | "m4a") {
-        cmd.args(["-movflags", "+faststart"]);
+        mid.extend(["-movflags", "+faststart"]);
     }
-    let mut child = cmd
-        .arg(&tmp)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    *running.child.lock().unwrap() = Some(child);
+    run_ffmpeg(app, running, "convert", src, &tmp, &mid, req.duration)?;
 
-    let err = thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
-    });
-    let total_us = req.duration.unwrap_or(0.0) * 1e6;
-    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<f64>().ok()) {
-            if total_us > 0.0 {
-                let percent = (us / total_us * 100.0).clamp(0.0, 100.0);
-                let _ = app.emit("progress", Progress { stage: "convert", percent, speed: None, eta: None });
-            }
-        }
-    }
-    let status = running.child.lock().unwrap().take().and_then(|mut c| c.wait().ok());
-    let err = err.join().unwrap_or_default();
-
-    if running.cancelled.load(Ordering::SeqCst) {
-        let _ = fs::remove_file(&tmp);
-        return Err("Cancelled".into());
-    }
-    if !status.is_some_and(|s| s.success()) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err.lines().last().unwrap_or("Conversion failed").to_string());
-    }
     let dest = src.with_extension(plan.ext);
     let _ = fs::remove_file(src);
     fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
     Ok(dest)
 }
 
-#[tauri::command]
-fn start_download(app: AppHandle, running: State<Running>, req: Request) -> Result<(), String> {
-    if req.video.is_none() && req.audio.is_none() {
-        return Err("Pick a video or audio stream".into());
+// Claims the runner, runs the job on its own thread, then records history and emits done or failed.
+fn spawn_job(
+    app: AppHandle,
+    running: &Running,
+    job: impl FnOnce(&AppHandle, &Running) -> Result<Entry, String> + Send + 'static,
+) -> Result<(), String> {
+    if running.busy.swap(true, Ordering::SeqCst) {
+        return Err("A job is already running".into());
     }
-    let mut slot = running.child.lock().unwrap();
-    if slot.is_some() {
-        return Err("A download is already running".into());
-    }
-    let dir = download_dir(&app)?;
     running.cancelled.store(false, Ordering::SeqCst);
-    let mut child = ytdlp(&app)?
-        .args(["-f", &format_selector(&req)])
-        .args(["--merge-output-format", "mkv", "--force-overwrites"])
-        .args(["--windows-filenames", "--newline", "--progress"])
-        .args([
-            "--progress-template",
-            "download:%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
-            "--print",
-            "after_move:filepath",
-            "-o",
-        ])
-        .arg(dir.join("%(title).150B.%(ext)s"))
-        .arg(&req.url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    *slot = Some(child);
-    drop(slot);
-
     thread::spawn(move || {
-        let err = thread::spawn(move || {
-            let mut s = String::new();
-            let _ = stderr.read_to_string(&mut s);
-            s
-        });
-        let mut path = String::new();
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let p: Vec<&str> = line.split('|').collect();
-            if p.len() == 5 {
-                let n = |i: usize| p[i].trim().parse::<f64>().ok();
-                let total = n(1).or(n(2)).unwrap_or(0.0);
-                let percent = if total > 0.0 { n(0).unwrap_or(0.0) / total * 100.0 } else { 0.0 };
-                let _ = app.emit(
-                    "progress",
-                    Progress { stage: "download", percent, speed: n(3), eta: n(4).map(|e| e as u64) },
-                );
-            } else if !line.trim().is_empty() {
-                path = line.trim().to_string();
-            }
-        }
         let running = app.state::<Running>();
-        let status = running.child.lock().unwrap().take().and_then(|mut c| c.wait().ok());
-        let err = err.join().unwrap_or_default();
-        if running.cancelled.load(Ordering::SeqCst) {
-            let _ = app.emit("failed", "Cancelled");
-            return;
-        }
-        if !status.is_some_and(|s| s.success()) || path.is_empty() {
-            let _ = app.emit("failed", last_error(&err));
-            return;
-        }
-        match convert(&app, &running, &req, Path::new(&path)) {
-            Ok(final_path) => {
-                let entry = Entry {
-                    id: now(),
-                    title: req.title.clone(),
-                    format: req.label.clone(),
-                    size: fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0),
-                    path: final_path.display().to_string(),
-                    at: now(),
-                    req: Some(req),
-                };
+        let res = job(&app, &running);
+        *running.child.lock().unwrap() = None;
+        running.busy.store(false, Ordering::SeqCst);
+        match res {
+            Ok(entry) => {
                 if let Ok(dir) = data_dir(&app) {
                     let file = dir.join("history.json");
                     let mut h: Vec<Entry> = read_json(file.clone());
@@ -467,6 +469,164 @@ fn start_download(app: AppHandle, running: State<Running>, req: Request) -> Resu
         }
     });
     Ok(())
+}
+
+fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<Entry, String> {
+    let dir = download_dir(app)?;
+    let mut child = ytdlp(app)?
+        .arg("--no-playlist")
+        .args(["-f", &format_selector(&req)])
+        .args(["--merge-output-format", "mkv", "--force-overwrites"])
+        .args(["--windows-filenames", "--newline", "--progress"])
+        .args([
+            "--progress-template",
+            "download:%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
+            "--print",
+            "after_move:codecs|%(vcodec)s|%(acodec)s",
+            "--print",
+            "after_move:filepath",
+            "-o",
+        ])
+        .arg(dir.join("%(title).150B.%(ext)s"))
+        .arg(&req.url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    *running.child.lock().unwrap() = Some(child);
+
+    let err = thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    let mut path = String::new();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let p: Vec<&str> = line.split('|').collect();
+        if p[0] == "codecs" && p.len() == 3 {
+            // The codecs yt-dlp actually fetched win over what the format list guessed.
+            let known = |c: &str| (c != "none" && c != "NA").then(|| c.to_string());
+            req.vc = known(p[1]).map(|c| vfam(&c).to_string());
+            req.ac = known(p[2]).map(|c| afam(&c).to_string());
+        } else if p.len() == 5 {
+            let n = |i: usize| p[i].trim().parse::<f64>().ok();
+            let total = n(1).or(n(2)).unwrap_or(0.0);
+            let percent = if total > 0.0 { n(0).unwrap_or(0.0) / total * 100.0 } else { 0.0 };
+            let _ = app.emit(
+                "progress",
+                Progress { stage: "download", percent, speed: n(3), eta: n(4).map(|e| e as u64) },
+            );
+        } else if !line.trim().is_empty() {
+            path = line.trim().to_string();
+        }
+    }
+    let status = running.child.lock().unwrap().take().and_then(|mut c| c.wait().ok());
+    let err = err.join().unwrap_or_default();
+    if running.cancelled.load(Ordering::SeqCst) {
+        return Err("Cancelled".into());
+    }
+    if !status.is_some_and(|s| s.success()) || path.is_empty() {
+        return Err(last_error(&err));
+    }
+
+    let final_path = convert(app, running, &req, Path::new(&path))?;
+    Ok(Entry {
+        id: now(),
+        title: req.title.clone(),
+        format: req.label.clone(),
+        size: fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0),
+        path: final_path.display().to_string(),
+        at: now(),
+        req: Some(req),
+        from_size: None,
+    })
+}
+
+#[tauri::command]
+fn start_download(app: AppHandle, running: State<Running>, req: Request) -> Result<(), String> {
+    if req.selector.is_none() && req.video.is_none() && req.audio.is_none() {
+        return Err("Pick a video or audio stream".into());
+    }
+    spawn_job(app, &running, move |app, running| run_download(app, running, req))
+}
+
+fn probe_duration(path: &Path) -> Option<f64> {
+    let out = Command::new(bundled("ffmpeg"))
+        .creation_flags(NO_WINDOW)
+        .args(["-hide_banner", "-i"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stderr);
+    let t = text.split("Duration: ").nth(1)?.split(',').next()?;
+    let mut p = t.trim().split(':').map(|x| x.parse::<f64>().ok());
+    Some(p.next()?? * 3600.0 + p.next()?? * 60.0 + p.next()??)
+}
+
+fn unique(path: PathBuf) -> PathBuf {
+    let (stem, ext) = (
+        path.file_stem().unwrap().to_string_lossy().to_string(),
+        path.extension().unwrap().to_string_lossy().to_string(),
+    );
+    let mut p = path;
+    let mut n = 2;
+    while p.exists() {
+        p = p.with_file_name(format!("{stem} ({n}).{ext}"));
+        n += 1;
+    }
+    p
+}
+
+fn run_compress(app: &AppHandle, running: &Running, req: CompressReq) -> Result<Entry, String> {
+    let src = PathBuf::from(&req.path);
+    let stem = src.file_stem().ok_or("Bad file name")?.to_string_lossy().to_string();
+    let out = unique(download_dir(app)?.join(format!("{stem} compressed.mp4")));
+    let h265 = req.codec == "h265";
+    let crf = match (h265, req.preset.as_str()) {
+        (true, "small") => "30",
+        (true, "high") => "21",
+        (true, _) => "26",
+        (false, "small") => "28",
+        (false, "high") => "18",
+        (false, _) => "23",
+    };
+    let scale = req.max_height.map(|h| format!("scale=-2:'min({h},ih)'"));
+    let mut mid = vec![
+        "-c:v",
+        if h265 { "libx265" } else { "libx264" },
+        "-crf",
+        crf,
+        "-preset",
+        "medium",
+        "-pix_fmt",
+        "yuv420p",
+    ];
+    if h265 {
+        mid.extend(["-tag:v", "hvc1"]);
+    }
+    if let Some(s) = &scale {
+        mid.extend(["-vf", s]);
+    }
+    mid.extend(["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]);
+    run_ffmpeg(app, running, "compress", &src, &out, &mid, probe_duration(&src))?;
+
+    Ok(Entry {
+        id: now(),
+        title: stem,
+        format: format!("Compressed {}", if h265 { "H.265" } else { "H.264" }),
+        size: fs::metadata(&out).map(|m| m.len()).unwrap_or(0),
+        path: out.display().to_string(),
+        at: now(),
+        req: None,
+        from_size: fs::metadata(&src).map(|m| m.len()).ok(),
+    })
+}
+
+#[tauri::command]
+fn start_compress(app: AppHandle, running: State<Running>, req: CompressReq) -> Result<(), String> {
+    spawn_job(app, &running, move |app, running| run_compress(app, running, req))
 }
 
 #[tauri::command]
@@ -536,6 +696,7 @@ pub fn run() {
             fetch_info,
             convert_plan,
             start_download,
+            start_compress,
             cancel_download,
             get_history,
             remove_history,

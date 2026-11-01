@@ -1,0 +1,77 @@
+export type Stream = {
+  id: string;
+  label: string;
+  size: number | null;
+  codec: string;
+  codec_name: string;
+  audio_codec: string | null;
+  audio_name: string | null;
+};
+
+export type Item = { title: string; url: string; duration: number | null };
+
+export type Info = {
+  title: string;
+  thumbnail: string | null;
+  uploader: string | null;
+  duration: number | null;
+  videos: Stream[];
+  audios: Stream[];
+  entries: Item[];
+};
+
+export type Req = {
+  url: string;
+  title: string;
+  video: string | null;
+  audio: string | null;
+  selector: string | null;
+  vc: string | null;
+  ac: string | null;
+  preset: string;
+  duration: number | null;
+  label: string;
+};
+
+export type CReq = { path: string; preset: string; codec: string; max_height: number | null };
+
+export type Entry = {
+  id: number;
+  title: string;
+  format: string;
+  path: string;
+  size: number;
+  at: number;
+  req: Req | null;
+  from_size: number | null;
+};
+
+export type Plan = {
+  video: "copy" | "convert" | "none";
+  audio: "copy" | "convert" | "none";
+  video_to: string;
+  audio_to: string;
+  ext: string;
+};
+
+export type Progress = {
+  stage: "download" | "convert" | "compress";
+  percent: number;
+  speed: number | null;
+  eta: number | null;
+};
+
+export type Job = {
+  id: number;
+  kind: "download" | "compress";
+  title: string;
+  label: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  progress: Progress | null;
+  error?: string;
+  entry?: Entry;
+  req?: Req;
+  creq?: CReq;
+};
+
+export type NewJob = Pick<Job, "kind" | "title" | "label" | "req" | "creq">;

@@ -10,7 +10,9 @@ const paths = {
   circleCheck: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM8 12l3 3 5-6",
   history: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l4 2",
   refresh: "M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5",
-  alert: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4M12 16h.01",
+  compress: "M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7",
+  list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  alert:"M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4M12 16h.01",
 };
 
 export type IconName = keyof typeof paths;
