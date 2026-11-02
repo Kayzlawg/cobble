@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "./Icon";
 import { Seg, clock, size } from "./ui";
@@ -19,7 +19,10 @@ const QUALITY = [
   { value: "audio", text: "Audio only" },
 ];
 
-const heightOf = (s: Stream) => s.label.split(" ")[0];
+const looksLikeLink = (s: string) => /^https?:\/\/[^\s/]+\.[^\s/]+/i.test(s);
+const NOT_A_LINK = "That doesn't look like a link. It should start with https://";
+
+const heightOf =(s: Stream) => s.label.split(" ")[0];
 
 function Pick({
   title,
@@ -80,6 +83,8 @@ export default function Download({
   const [error, setError] = useState("");
   const [quality, setQuality] = useState("best");
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [check, setCheck] = useState<"idle" | "checking" | "ok" | "bad">("idle");
+  const latest = useRef("");
 
   const isList = !!info && info.entries.length > 0;
   const vs = info?.videos.find((s) => s.id === vid) ?? null;
@@ -95,15 +100,50 @@ export default function Download({
     invoke<Plan>("convert_plan", { preset, vc, ac }).then(setPlan);
   }, [preset, vc, ac, vid, aid, info, isList]);
 
+  // Any edit drops the previous result and check, so what is on screen always matches the box.
+  function edit(v: string) {
+    latest.current = v;
+    setUrl(v);
+    setInfo(null);
+    setError("");
+    setCheck("idle");
+  }
+
+  // Runs on paste. Only confirms the link is reachable and readable by yt-dlp; video details load on submit.
+  async function checkLink(link: string) {
+    if (!looksLikeLink(link)) {
+      setCheck("bad");
+      setError(NOT_A_LINK);
+      return;
+    }
+    setCheck("checking");
+    try {
+      await invoke("check_link", { url: link });
+      if (latest.current === link) setCheck("ok");
+    } catch (e) {
+      if (latest.current !== link) return;
+      setCheck("bad");
+      setError(String(e));
+    }
+  }
+
   async function fetchInfo(playlist = false) {
-    if (!url.trim() || fetching) return;
-    const wantList = playlist || (/[?&]list=/.test(url) && !/[?&]v=/.test(url));
-    setFetching(true);
+    const link = url.trim();
+    if (!link || fetching) return;
     setError("");
     setInfo(null);
+    // Reject text that is not a web link before spending seconds on yt-dlp. fetch_info then confirms the site really serves it.
+    if (!looksLikeLink(link)) {
+      setCheck("bad");
+      setError(NOT_A_LINK);
+      return;
+    }
+    const wantList = playlist || (/[?&]list=/.test(link) && !/[?&]v=/.test(link));
+    setFetching(true);
     setMerge(false);
     try {
-      const i = await invoke<Info>("fetch_info", { url: url.trim(), playlist: wantList });
+      const i = await invoke<Info>("fetch_info", { url: link, playlist: wantList });
+      setCheck("ok");
       setInfo(i);
       if (i.entries.length > 0) {
         setPicked(new Set(i.entries.map((e) => e.url)));
@@ -116,6 +156,7 @@ export default function Download({
         setPreset(v ? "ae" : "mp3");
       }
     } catch (e) {
+      setCheck("bad");
       setError(String(e));
     }
     setFetching(false);
@@ -141,10 +182,7 @@ export default function Download({
     if (!on && s) pickHeight(s);
   }
 
-  function reset() {
-    setInfo(null);
-    setUrl("");
-  }
+  const reset = () => edit("");
 
   function addSingle() {
     if (!info || !plan) return;
@@ -205,6 +243,11 @@ export default function Download({
     if (q !== "audio" && preset === "mp3") setPreset("ae");
   }
 
+  // Total of the picked tracks. A combined video stream already carries its audio. Blank if any needed size is unknown.
+  const parts = [vid ? vs?.size : undefined, aid && !vs?.audio_codec ? as?.size : undefined];
+  const needed = [!!vid, !!aid && !vs?.audio_codec];
+  const total = needed.some((n, i) => n && parts[i] == null) ? null : parts.reduce<number>((a, p) => a + (p ?? 0), 0);
+
   const summary = plan
     ? [
         plan.video !== "none" && vs
@@ -247,13 +290,35 @@ export default function Download({
         <Icon name="link" size={17} />
         <input
           value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          onPaste={() => setTimeout(() => fetchInfo(), 0)}
+          onChange={(e) => edit(e.target.value)}
+          onPaste={(e) => {
+            e.preventDefault();
+            const t = e.clipboardData.getData("text").trim();
+            edit(t);
+            checkLink(t);
+          }}
           placeholder="Paste a link or playlist"
           spellCheck={false}
           autoFocus
         />
-        {fetching && <span className="spin" aria-label="Loading" />}
+        {check === "checking" && <span className="spin" aria-label="Checking link" />}
+        {check === "ok" && (
+          <span className="state ok" title="Link works">
+            <Icon name="circleCheck" size={16} />
+          </span>
+        )}
+        {check === "bad" && (
+          <span className="state no" title="Link can't be loaded">
+            <Icon name="alert" size={16} />
+          </span>
+        )}
+        {fetching ? (
+          <span className="spin" aria-label="Loading" />
+        ) : (
+          <button type="submit" className="submit" aria-label="Load link" disabled={!url.trim()}>
+            <Icon name="arrow" size={16} />
+          </button>
+        )}
       </form>
 
       {error && (
@@ -267,6 +332,16 @@ export default function Download({
         <button className="link" onClick={() => fetchInfo(true)}>
           This link is part of a playlist. Load the whole playlist
         </button>
+      )}
+
+      {fetching && (
+        <div className="head" aria-hidden="true">
+          <div className="thumb skel" />
+          <div className="titles">
+            <div className="skel line" style={{ width: "60%" }} />
+            <div className="skel line" style={{ width: "30%" }} />
+          </div>
+        </div>
       )}
 
       {info && (
@@ -415,7 +490,11 @@ export default function Download({
               <Icon name="folder" />
               {dir.split("\\").pop()}
             </button>
-            <small className="sum">{summary}</small>
+            <small className="sum">
+              {total ? <b>{size(total)}</b> : null}
+              {total && summary ? ", " : ""}
+              {summary}
+            </small>
             <button className="go" onClick={addSingle} disabled={!vid && !aid}>
               Download
             </button>

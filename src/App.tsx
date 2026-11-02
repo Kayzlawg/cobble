@@ -8,7 +8,7 @@ import Download from "./Download";
 import Compress from "./Compress";
 import Queue from "./Queue";
 import TitleBar from "./TitleBar";
-import { size } from "./ui";
+import { Thumb, size, useLeave } from "./ui";
 import type { Entry, Job, NewJob, Progress } from "./types";
 import "./App.css";
 
@@ -24,6 +24,7 @@ export default function App() {
   const [version, setVersion] = useState("");
   const [updating, setUpdating] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [leaving, leave] = useLeave();
   const nextId = useRef(1);
   const nextToast = useRef(1);
 
@@ -38,7 +39,8 @@ export default function App() {
     setTimeout(() => dismiss(id), ms);
   }, [dismiss]);
 
-  const patchRunning = (f: (j: Job) => Job) => setJobs((js) => js.map((j) => (j.status === "running" ? f(j) : j)));
+  const live = (j: Job) => j.status === "running" || j.status === "cancelling";
+  const patchRunning = (f: (j: Job) => Job) => setJobs((js) => js.map((j) => (live(j) ? f(j) : j)));
 
   useEffect(() => {
     invoke<Entry[]>("get_history").then(setHistory);
@@ -52,7 +54,9 @@ export default function App() {
       } catch {}
     });
     const off = [
-      listen<Progress>("progress", (e) => patchRunning((j) => ({ ...j, progress: e.payload }))),
+      listen<Progress>("progress", (e) =>
+        patchRunning((j) => (j.status === "cancelling" ? j : { ...j, progress: e.payload })),
+      ),
       listen<Entry>("done", (e) => {
         patchRunning((j) => ({ ...j, status: "done", entry: e.payload, progress: null }));
         setHistory((h) => [e.payload, ...h]);
@@ -75,7 +79,7 @@ export default function App() {
 
   // The backend runs one job at a time, so the queue hands it the next one whenever nothing is running.
   useEffect(() => {
-    if (jobs.some((j) => j.status === "running")) return;
+    if (jobs.some(live)) return;
     const next = jobs.find((j) => j.status === "queued");
     if (!next) return;
     setJobs((js) => js.map((j) => (j.id === next.id ? { ...j, status: "running", progress: null } : j)));
@@ -90,7 +94,12 @@ export default function App() {
   }
 
   const retry = (id: number) => setJobs((js) => js.map((j) => (j.id === id ? { ...j, status: "queued", error: undefined } : j)));
-  const clearFinished = () => setJobs((js) => js.filter((j) => j.status === "queued" || j.status === "running"));
+  const clearFinished = () => setJobs((js) => js.filter((j) => j.status === "queued" || live(j)));
+  // Shows "Cancelling" at once. The backend answers with a "failed: Cancelled" event once the process tree is gone.
+  const cancel = (id: number) => {
+    setJobs((js) => js.map((j) => (j.id === id ? { ...j, status: "cancelling", progress: null } : j)));
+    invoke("cancel_download");
+  };
   const removeJob = (id: number) => setJobs((js) => js.filter((j) => j.id !== id));
 
   async function changeDir() {
@@ -115,7 +124,7 @@ export default function App() {
     add([{ kind: "download", title: e.title, label: e.format, req: e.req }]);
   };
 
-  const active = jobs.filter((j) => j.status === "queued" || j.status === "running").length;
+  const active = jobs.filter((j) => j.status === "queued" || live(j)).length;
   const nav = (p: Page, label: string, icon: IconName, count = 0) => (
     <button className={`nav ${page === p ? "on" : ""}`} onClick={() => setPage(p)}>
       <Icon name={icon} />
@@ -147,7 +156,7 @@ export default function App() {
           <Compress dir={dir} onChangeDir={changeDir} onAdd={add} />
         </div>
 
-        {page === "queue" && <Queue jobs={jobs} onRemove={removeJob} onRetry={retry} onClear={clearFinished} />}
+        {page === "queue" && <Queue jobs={jobs} onCancel={cancel} onRemove={removeJob} onRetry={retry} onClear={clearFinished} />}
 
         {page === "history" && (
           <>
@@ -157,7 +166,8 @@ export default function App() {
             ) : (
               <div className="list">
                 {history.map((h) => (
-                  <div className="row" key={h.id}>
+                  <div className={`row ${leaving.has(h.id) ? "leaving" : ""}`} key={h.id}>
+                    <Thumb path={h.path} />
                     <div className="titles">
                       <div className="t">{h.title}</div>
                       <div className="s">
@@ -173,7 +183,7 @@ export default function App() {
                     <button className="icon" aria-label="Show in folder" onClick={() => revealItemInDir(h.path)}>
                       <Icon name="folder" />
                     </button>
-                    <button className="icon" aria-label="Remove from history" onClick={() => removeHistory(h.id)}>
+                    <button className="icon" aria-label="Remove from history" onClick={() => leave(h.id, () => removeHistory(h.id))}>
                       <Icon name="trash" />
                     </button>
                   </div>
@@ -199,7 +209,7 @@ export default function App() {
               <div className="row">
                 <div className="titles">
                   <div className="t">yt-dlp</div>
-                  <div className="s">{version || "..."}</div>
+                  <div className="s">{version || <span className="spin" aria-label="Loading" />}</div>
                 </div>
                 <button className="ghost" onClick={update} disabled={updating}>
                   {updating ? "Updating..." : "Update"}

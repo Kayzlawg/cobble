@@ -33,7 +33,7 @@ export type Req = {
   label: string;
 };
 
-export type CReq = { path: string; preset: string; codec: string; max_height: number | null };
+export type CReq = { path: string; preset: string; codec: string; max_height: number | null; gpu: boolean };
 
 export type Entry = {
   id: number;
@@ -66,12 +66,13 @@ export type Job = {
   kind: "download" | "compress";
   title: string;
   label: string;
-  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  status: "queued" | "running" | "cancelling" | "done" | "failed" | "cancelled";
   progress: Progress | null;
+  est?: string;
   error?: string;
   entry?: Entry;
   req?: Req;
   creq?: CReq;
 };
 
-export type NewJob = Pick<Job, "kind" | "title" | "label" | "req" | "creq">;
+export type NewJob = Pick<Job, "kind" | "title" | "label" | "est" | "req" | "creq">;

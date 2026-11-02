@@ -78,6 +78,8 @@ struct CompressReq {
     preset: String,
     codec: String,
     max_height: Option<u32>,
+    #[serde(default)]
+    gpu: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -312,6 +314,21 @@ async fn fetch_info(app: AppHandle, url: String, playlist: Option<bool>) -> Resu
     })
 }
 
+// Confirms yt-dlp can reach and read the link, without returning any video details.
+#[tauri::command]
+async fn check_link(app: AppHandle, url: String) -> Result<(), String> {
+    let mut cmd = ytdlp(&app)?;
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        cmd.args(["--no-playlist", "--flat-playlist", "--socket-timeout", "10", "--print", "extractor_key"])
+            .arg(url)
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if out.status.success() { Ok(()) } else { Err(last_error(&String::from_utf8_lossy(&out.stderr))) }
+}
+
 fn last_error(stderr: &str) -> String {
     stderr
         .lines()
@@ -348,6 +365,24 @@ fn format_selector(req: &Request) -> String {
     })
 }
 
+// yt-dlp spawns ffmpeg and deno. Killing only the parent leaves them holding the output pipes open, so the job never ends.
+fn kill_tree(c: &mut Child) {
+    let _ = Command::new("taskkill")
+        .creation_flags(NO_WINDOW)
+        .args(["/T", "/F", "/PID"])
+        .arg(c.id().to_string())
+        .output();
+    let _ = c.kill();
+}
+
+// Stores the running child so cancel can reach it. A cancel that landed before this point is honoured here.
+fn register(running: &Running, mut child: Child) {
+    if running.cancelled.load(Ordering::SeqCst) {
+        kill_tree(&mut child);
+    }
+    *running.child.lock().unwrap() = Some(child);
+}
+
 // Runs ffmpeg on `input` into `out`, reporting progress. Removes `out` if it fails or is cancelled.
 fn run_ffmpeg(
     app: &AppHandle,
@@ -370,7 +405,7 @@ fn run_ffmpeg(
         .map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    *running.child.lock().unwrap() = Some(child);
+    register(running, child);
 
     let err = thread::spawn(move || {
         let mut s = String::new();
@@ -450,8 +485,15 @@ fn spawn_job(
     running.cancelled.store(false, Ordering::SeqCst);
     thread::spawn(move || {
         let running = app.state::<Running>();
-        let res = job(&app, &running);
+        let mut res = job(&app, &running);
         *running.child.lock().unwrap() = None;
+        // A cancel that arrived too late to stop the job still wins: the finished file is deleted.
+        if running.cancelled.load(Ordering::SeqCst) {
+            if let Ok(entry) = &res {
+                let _ = fs::remove_file(&entry.path);
+            }
+            res = Err("Cancelled".into());
+        }
         running.busy.store(false, Ordering::SeqCst);
         match res {
             Ok(entry) => {
@@ -495,7 +537,7 @@ fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<
         .map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    *running.child.lock().unwrap() = Some(child);
+    register(running, child);
 
     let err = thread::spawn(move || {
         let mut s = String::new();
@@ -552,17 +594,86 @@ fn start_download(app: AppHandle, running: State<Running>, req: Request) -> Resu
     spawn_job(app, &running, move |app, running| run_download(app, running, req))
 }
 
-fn probe_duration(path: &Path) -> Option<f64> {
-    let out = Command::new(bundled("ffmpeg"))
+// `ffmpeg -i` with no output prints the stream info to stderr and exits non-zero, which is fine here.
+fn probe(path: &Path) -> String {
+    Command::new(bundled("ffmpeg"))
         .creation_flags(NO_WINDOW)
         .args(["-hide_banner", "-i"])
         .arg(path)
         .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stderr);
+        .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+        .unwrap_or_default()
+}
+
+fn probe_duration(path: &Path) -> Option<f64> {
+    let text = probe(path);
     let t = text.split("Duration: ").nth(1)?.split(',').next()?;
     let mut p = t.trim().split(':').map(|x| x.parse::<f64>().ok());
     Some(p.next()?? * 3600.0 + p.next()?? * 60.0 + p.next()??)
+}
+
+// The first WxH token on the Video line. The 3 digit minimum skips hex codec tags like 0x31637661.
+fn video_height(text: &str) -> Option<u32> {
+    let line = text.lines().find(|l| l.contains("Video:"))?;
+    line.split(|c: char| c.is_whitespace() || c == ',').find_map(|t| {
+        let (w, h) = t.split_once('x')?;
+        let ok = |s: &str| (3..=5).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+        (ok(w) && ok(h)).then(|| h.parse().ok()).flatten()
+    })
+}
+
+#[derive(Serialize)]
+struct VideoInfo {
+    size: u64,
+    height: Option<u32>,
+}
+
+// True when ffmpeg can open the NVIDIA encoder, which needs an NVIDIA card and a recent driver.
+#[tauri::command]
+async fn gpu_available() -> bool {
+    tauri::async_runtime::spawn_blocking(|| {
+        Command::new(bundled("ffmpeg"))
+            .creation_flags(NO_WINDOW)
+            .args(["-v", "error", "-f", "lavfi", "-i", "color=s=256x256:d=0.1", "-frames:v", "1"])
+            .args(["-c:v", "h264_nvenc", "-f", "null", "-"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
+    .await
+    .unwrap_or(false)
+}
+
+// A small JPEG frame from a video file, sent as raw bytes. Audio files and missing files return an error.
+#[tauri::command]
+async fn thumbnail(path: String) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // One second in skips black intro frames. Clips shorter than that fall back to the first frame.
+        for ss in ["1", "0"] {
+            let out = Command::new(bundled("ffmpeg"))
+                .creation_flags(NO_WINDOW)
+                .args(["-v", "error", "-ss", ss, "-i"])
+                .arg(&path)
+                .args(["-frames:v", "1", "-vf", "scale=224:-2", "-f", "mjpeg", "pipe:1"])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !out.stdout.is_empty() {
+                return Ok(tauri::ipc::Response::new(out.stdout));
+            }
+        }
+        Err("No frame".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn probe_video(path: String) -> Result<VideoInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = PathBuf::from(path);
+        Ok(VideoInfo { size: fs::metadata(&p).map_err(|e| e.to_string())?.len(), height: video_height(&probe(&p)) })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn unique(path: PathBuf) -> PathBuf {
@@ -593,24 +704,37 @@ fn run_compress(app: &AppHandle, running: &Running, req: CompressReq) -> Result<
         (false, _) => "23",
     };
     let scale = req.max_height.map(|h| format!("scale=-2:'min({h},ih)'"));
-    let mut mid = vec![
-        "-c:v",
-        if h265 { "libx265" } else { "libx264" },
-        "-crf",
-        crf,
-        "-preset",
-        "medium",
-        "-pix_fmt",
-        "yuv420p",
-    ];
-    if h265 {
-        mid.extend(["-tag:v", "hvc1"]);
+    let duration = probe_duration(&src);
+    // With GPU on, a failed NVENC run (no NVIDIA card, driver too old) is retried once on the CPU.
+    let mut res = Err("ffmpeg failed".to_string());
+    for gpu in if req.gpu { vec![true, false] } else { vec![false] } {
+        let enc = match (gpu, h265) {
+            (true, true) => "hevc_nvenc",
+            (true, false) => "h264_nvenc",
+            (false, true) => "libx265",
+            (false, false) => "libx264",
+        };
+        let mut mid = vec!["-c:v", enc];
+        // ponytail: the same number is used as CRF and as NVENC's CQ. They are close but not identical.
+        if gpu {
+            mid.extend(["-rc", "vbr", "-cq", crf, "-b:v", "0", "-preset", "p5"]);
+        } else {
+            mid.extend(["-crf", crf, "-preset", "medium"]);
+        }
+        mid.extend(["-pix_fmt", "yuv420p"]);
+        if h265 {
+            mid.extend(["-tag:v", "hvc1"]);
+        }
+        if let Some(s) = &scale {
+            mid.extend(["-vf", s]);
+        }
+        mid.extend(["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]);
+        res = run_ffmpeg(app, running, "compress", &src, &out, &mid, duration);
+        if res.is_ok() || running.cancelled.load(Ordering::SeqCst) {
+            break;
+        }
     }
-    if let Some(s) = &scale {
-        mid.extend(["-vf", s]);
-    }
-    mid.extend(["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]);
-    run_ffmpeg(app, running, "compress", &src, &out, &mid, probe_duration(&src))?;
+    res?;
 
     Ok(Entry {
         id: now(),
@@ -633,7 +757,7 @@ fn start_compress(app: AppHandle, running: State<Running>, req: CompressReq) -> 
 fn cancel_download(running: State<Running>) {
     running.cancelled.store(true, Ordering::SeqCst);
     if let Some(c) = running.child.lock().unwrap().as_mut() {
-        let _ = c.kill();
+        kill_tree(c);
     }
 }
 
@@ -694,9 +818,13 @@ pub fn run() {
         .manage(Running::default())
         .invoke_handler(tauri::generate_handler![
             fetch_info,
+            check_link,
             convert_plan,
             start_download,
             start_compress,
+            probe_video,
+            gpu_available,
+            thumbnail,
             cancel_download,
             get_history,
             remove_history,
@@ -725,5 +853,12 @@ mod tests {
         assert_eq!(p.ext, "");
         let p = convert_plan("mp3", None, Some("mp3"));
         assert_eq!((p.audio, p.ext), ("copy", "mp3"));
+    }
+
+    #[test]
+    fn reads_height_not_codec_tag() {
+        let l = "  Stream #0:0: Video: h264 (High) (avc1 / 0x31637661), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], 30 fps";
+        assert_eq!(video_height(l), Some(1080));
+        assert_eq!(video_height("Audio: aac"), None);
     }
 }

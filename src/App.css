@@ -245,7 +245,39 @@ h1 {
   border-color: var(--accent);
 }
 
+.state {
+  display: flex;
+}
+
+.state.ok {
+  color: var(--accent);
+}
+
+.state.no {
+  color: var(--danger);
+}
+
+.submit {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 0;
+  border-radius: 6px;
+}
+
+.submit:disabled {
+  background: none;
+  color: var(--dim);
+  opacity: 0.5;
+}
+
 .spin {
+  display: inline-block;
+  vertical-align: -2px;
+  flex-shrink: 0;
   width: 14px;
   height: 14px;
   border: 2px solid var(--line);
@@ -261,7 +293,8 @@ h1 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spin {
+  .spin,
+  .skel {
     animation-duration: 3s;
   }
 }
@@ -303,6 +336,59 @@ h1 {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.thumb.sm {
+  width: 64px;
+  height: 36px;
+  border-radius: 4px;
+}
+
+.skel {
+  background: linear-gradient(90deg, #2c2c2c 25%, #383838 50%, #2c2c2c 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+
+.skel.line {
+  height: 12px;
+  margin-top: 8px;
+  border-radius: 4px;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.sum b {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.sum .spin {
+  margin-right: 6px;
+}
+
+.row.leaving {
+  overflow: hidden;
+  pointer-events: none;
+  animation: row-out 0.18s ease-in forwards;
+}
+
+@keyframes row-out {
+  from {
+    max-height: 80px;
+  }
+  to {
+    max-height: 0;
+    opacity: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-top-width: 0;
+    transform: translateX(8px);
+  }
 }
 
 .titles {

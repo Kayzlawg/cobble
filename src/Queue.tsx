@@ -1,7 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Icon } from "./Icon";
-import { clock, size } from "./ui";
+import { clock, size, useLeave } from "./ui";
 import type { Job } from "./types";
 
 function status(j: Job) {
@@ -14,6 +13,8 @@ function status(j: Job) {
       const bits = [p ? `${Math.round(p.percent)}%` : "", p?.speed ? `${(p.speed / 1e6).toFixed(1)} MB/s` : "", p?.eta != null ? `${clock(p.eta)} left` : ""];
       return [verb, ...bits.filter(Boolean)].join(", ");
     }
+    case "cancelling":
+      return "Cancelling...";
     case "done": {
       const e = j.entry;
       return e?.from_size ? `Done, ${size(e.from_size)} to ${size(e.size)}` : `Done, ${size(e?.size ?? null)}`;
@@ -27,15 +28,18 @@ function status(j: Job) {
 
 export default function Queue({
   jobs,
+  onCancel,
   onRemove,
   onRetry,
   onClear,
 }: {
   jobs: Job[];
+  onCancel: (id: number) => void;
   onRemove: (id: number) => void;
   onRetry: (id: number) => void;
   onClear: () => void;
 }) {
+  const [leaving, leave] = useLeave();
   const finished = jobs.some((j) => j.status === "done" || j.status === "failed" || j.status === "cancelled");
   return (
     <>
@@ -52,11 +56,11 @@ export default function Queue({
       ) : (
         <div className="list">
           {jobs.map((j) => (
-            <div className="row" key={j.id}>
+            <div className={`row ${leaving.has(j.id) ? "leaving" : ""}`} key={j.id}>
               <div className="titles">
                 <div className="t">{j.title}</div>
                 <div className={`s ${j.status === "failed" ? "bad" : ""}`}>
-                  {j.label}, {status(j)}
+                  {[j.label, status(j), (j.status === "queued" || j.status === "running") && j.est].filter(Boolean).join(", ")}
                 </div>
                 {j.status === "running" && (
                   <div className="bar">
@@ -64,13 +68,13 @@ export default function Queue({
                   </div>
                 )}
               </div>
-              {j.status === "running" && (
-                <button className="ghost" onClick={() => invoke("cancel_download")}>
+              {(j.status === "running" || j.status === "cancelling") && (
+                <button className="ghost" disabled={j.status === "cancelling"} onClick={() => onCancel(j.id)}>
                   Cancel
                 </button>
               )}
               {j.status === "queued" && (
-                <button className="icon" aria-label="Remove from queue" onClick={() => onRemove(j.id)}>
+                <button className="icon" aria-label="Remove from queue" onClick={() => leave(j.id, () => onRemove(j.id))}>
                   <Icon name="x" />
                 </button>
               )}
