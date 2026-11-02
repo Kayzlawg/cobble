@@ -30,6 +30,9 @@ jobs:
         run: ./setup.ps1
 
       - run: npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -42,4 +45,20 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" (Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe).FullName --clobber
+          TAG: ${{ github.event.release.tag_name }}
+          BODY: ${{ github.event.release.body }}
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe
+          $sig = "$($exe.FullName).sig"
+          [ordered]@{
+            version  = $env:TAG.TrimStart('v')
+            notes    = "$env:BODY"
+            pub_date = (Get-Date).ToUniversalTime().ToString('o')
+            platforms = @{
+              'windows-x86_64' = [ordered]@{
+                signature = (Get-Content $sig -Raw).Trim()
+                url       = "https://github.com/${{ github.repository }}/releases/download/$env:TAG/$($exe.Name)"
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content latest.json -Encoding utf8
+          gh release upload $env:TAG $exe.FullName $sig latest.json --clobber

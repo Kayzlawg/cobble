@@ -26,6 +26,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "publisher": "Cobble",
     "licenseFile": "windows/terms.txt",
@@ -45,6 +46,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGMjIyRDg4QzM1OTE4NzcKUldSM0dGbkRpQzBpbnlscGRyV0o1V3RzRVkyNjBmOERldDVuNHVVeGNXRjg5Z0VGTkxLL0daaGEK",
+      "endpoints": ["https://github.com/Kayzlawg/cobble/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
   }
 }
 

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Icon, type IconName } from "./Icon";
 import Download from "./Download";
@@ -53,6 +55,17 @@ export default function App() {
         if (latest > v) toast({ icon: "download", text: `yt-dlp ${latest} is available`, action: { label: "Update", run: update } }, 15000);
       } catch {}
     });
+    // App update. No update, no network or a failed install all stay silent.
+    (async () => {
+      try {
+        const u = await check();
+        if (!u) return;
+        const notes = u.body ? `\n\n${u.body}` : "";
+        if (!(await ask(`Cobble ${u.version} is available.${notes}`, { title: "Update available", okLabel: "Update", cancelLabel: "Later" }))) return;
+        await u.downloadAndInstall();
+        await relaunch();
+      } catch {}
+    })();
     const off = [
       listen<Progress>("progress", (e) =>
         patchRunning((j) => (j.status === "cancelling" ? j : { ...j, progress: e.payload })),

@@ -28,3 +28,4 @@ src-tauri/binaries/
 
 # local notes
 notes/
+releasing.md
