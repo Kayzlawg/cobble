@@ -12,6 +12,9 @@ const paths = {
   refresh: "M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5",
   compress: "M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7",
   list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  minus: "M5 12h14",
+  square: "M5 5h14v14H5z",
+  restore: "M8 8h11v11H8zM5 16V5h11",
   alert:"M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4M12 16h.01",
 };
 

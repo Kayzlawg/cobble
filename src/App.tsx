@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -7,9 +7,12 @@ import { Icon, type IconName } from "./Icon";
 import Download from "./Download";
 import Compress from "./Compress";
 import Queue from "./Queue";
+import TitleBar from "./TitleBar";
 import { size } from "./ui";
 import type { Entry, Job, NewJob, Progress } from "./types";
 import "./App.css";
+
+type Toast = { id: number; icon: IconName; text: string; action?: { label: string; run: () => void } };
 
 type Page = "download" | "compress" | "queue" | "history" | "settings";
 
@@ -20,19 +23,40 @@ export default function App() {
   const [dir, setDir] = useState("");
   const [version, setVersion] = useState("");
   const [updating, setUpdating] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
+  const nextToast = useRef(1);
+
+  const dismiss = (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id));
+  const toast = useCallback((t: Omit<Toast, "id">, ms = 5000) => {
+    const id = nextToast.current++;
+    setToasts((ts) => [...ts, { ...t, id }]);
+    setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), ms);
+  }, []);
 
   const patchRunning = (f: (j: Job) => Job) => setJobs((js) => js.map((j) => (j.status === "running" ? f(j) : j)));
 
   useEffect(() => {
     invoke<Entry[]>("get_history").then(setHistory);
     invoke<string>("get_download_dir").then(setDir);
-    invoke<string>("ytdlp_version").then(setVersion);
+    invoke<string>("ytdlp_version").then(async (v) => {
+      setVersion(v);
+      // Release tags are dates (2026.03.17), so a plain string compare orders them. A failed check stays silent.
+      try {
+        const latest: string = (await (await fetch("https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest")).json()).tag_name;
+        if (latest > v) toast({ icon: "download", text: `yt-dlp ${latest} is available`, action: { label: "Update", run: update } }, 15000);
+      } catch {}
+    });
     const off = [
       listen<Progress>("progress", (e) => patchRunning((j) => ({ ...j, progress: e.payload }))),
       listen<Entry>("done", (e) => {
         patchRunning((j) => ({ ...j, status: "done", entry: e.payload, progress: null }));
         setHistory((h) => [e.payload, ...h]);
+        toast({
+          icon: "circleCheck",
+          text: `Finished: ${e.payload.title}`,
+          action: { label: "Show", run: () => revealItemInDir(e.payload.path) },
+        });
       }),
       listen<string>("failed", (e) =>
         patchRunning((j) =>
@@ -75,8 +99,10 @@ export default function App() {
 
   async function update() {
     setUpdating(true);
-    setVersion(await invoke<string>("update_ytdlp"));
+    const v = await invoke<string>("update_ytdlp");
+    setVersion(v);
     setUpdating(false);
+    toast({ icon: "circleCheck", text: `yt-dlp updated to ${v}` });
   }
 
   const removeHistory = async (id: number) => setHistory(await invoke<Entry[]>("remove_history", { id }));
@@ -96,6 +122,8 @@ export default function App() {
 
   return (
     <div className="app">
+      <TitleBar />
+      <div className="body">
       <aside>
         <div className="brand">Cobble</div>
         {nav("download", "Download", "download")}
@@ -177,6 +205,30 @@ export default function App() {
           </>
         )}
       </main>
+      </div>
+
+      <div className="toasts" aria-live="polite">
+        {toasts.map((t) => (
+          <div className="toast" key={t.id}>
+            <Icon name={t.icon} />
+            <span>{t.text}</span>
+            {t.action && (
+              <button
+                className="ghost"
+                onClick={() => {
+                  t.action!.run();
+                  dismiss(t.id);
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
+            <button className="icon" aria-label="Dismiss" onClick={() => dismiss(t.id)}>
+              <Icon name="x" />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

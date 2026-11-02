@@ -45,7 +45,101 @@ input:focus-visible {
 
 .app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding-left: 12px;
+  background: var(--side);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  font-weight: 500;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.titlebar img,
+.titlebar span {
+  pointer-events: none;
+}
+
+.ctl {
+  margin-left: auto;
+  display: flex;
+  height: 100%;
+}
+
+.ctl button {
+  width: 46px;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ctl button:hover {
+  background: #272727;
+  color: var(--text);
+}
+
+.ctl .close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 380px;
+  padding: 8px 8px 8px 14px;
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px #000a;
+  animation: toast-in 0.18s ease-out;
+}
+
+.toast span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast .ghost {
+  height: 28px;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
 }
 
 aside {
