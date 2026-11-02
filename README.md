@@ -69,7 +69,7 @@ npm run tauri build   # installer
 
 ## Contributing
 
-Issues and pull requests are welcome. Please open an issue first for larger changes.
+Feedback is more than welcome, though open an issue for larger changes or contact me by my email on the website. Both can get you to me.
 
 ## License
 
