@@ -135,6 +135,17 @@ input:focus-visible {
   height: 28px;
 }
 
+.toast.out {
+  animation: toast-out 0.18s ease-in forwards;
+}
+
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;

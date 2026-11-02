@@ -12,7 +12,7 @@ import { size } from "./ui";
 import type { Entry, Job, NewJob, Progress } from "./types";
 import "./App.css";
 
-type Toast = { id: number; icon: IconName; text: string; action?: { label: string; run: () => void } };
+type Toast = { id: number; closing?: boolean; icon: IconName; text: string; action?: { label: string; run: () => void } };
 
 type Page = "download" | "compress" | "queue" | "history" | "settings";
 
@@ -27,12 +27,16 @@ export default function App() {
   const nextId = useRef(1);
   const nextToast = useRef(1);
 
-  const dismiss = (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id));
+  // Marks the toast as closing so it can fade out, then removes it once the animation has run.
+  const dismiss = useCallback((id: number) => {
+    setToasts((ts) => ts.map((t) => (t.id === id ? { ...t, closing: true } : t)));
+    setTimeout(() => setToasts((ts) => ts.filter((t) => t.id !== id)), 180);
+  }, []);
   const toast = useCallback((t: Omit<Toast, "id">, ms = 5000) => {
     const id = nextToast.current++;
     setToasts((ts) => [...ts, { ...t, id }]);
-    setTimeout(() => setToasts((ts) => ts.filter((x) => x.id !== id)), ms);
-  }, []);
+    setTimeout(() => dismiss(id), ms);
+  }, [dismiss]);
 
   const patchRunning = (f: (j: Job) => Job) => setJobs((js) => js.map((j) => (j.status === "running" ? f(j) : j)));
 
@@ -209,7 +213,7 @@ export default function App() {
 
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => (
-          <div className="toast" key={t.id}>
+          <div className={`toast ${t.closing ? "out" : ""}`} key={t.id}>
             <Icon name={t.icon} />
             <span>{t.text}</span>
             {t.action && (
