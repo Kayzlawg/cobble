@@ -54,7 +54,7 @@ File sizes and formats in the screenshots are illustrative.
 1. Download the installer from [cobbleapp.ca/download](https://cobbleapp.ca/download).
 2. Run it. Windows 64-bit only.
 
-The installer is not yet code signed, so Windows SmartScreen shows an unknown publisher warning. See the [code signing policy](https://cobbleapp.ca/code-signing).
+The installer is not yet code signed, so Windows SmartScreen shows an unknown publisher warning. I plan on using signpath but things could change. For more details see the [code signing policy](https://cobbleapp.ca/code-signing). 
 
 ## Build from source
 
