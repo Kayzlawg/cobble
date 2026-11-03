@@ -46,6 +46,14 @@ struct Item {
 }
 
 #[derive(Serialize)]
+struct Brief {
+    title: String,
+    thumbnail: Option<String>,
+    uploader: Option<String>,
+    duration: Option<f64>,
+}
+
+#[derive(Serialize)]
 struct Info {
     title: String,
     thumbnail: Option<String>,
@@ -314,19 +322,42 @@ async fn fetch_info(app: AppHandle, url: String, playlist: Option<bool>) -> Resu
     })
 }
 
-// Confirms yt-dlp can reach and read the link, without returning any video details.
+// Fast first pass: confirms yt-dlp can read the link and returns name, duration and thumbnail before the slower
+// format listing. Skipping the YouTube player JS drops the format list but saves a second or more.
 #[tauri::command]
-async fn check_link(app: AppHandle, url: String) -> Result<(), String> {
+async fn check_link(app: AppHandle, url: String) -> Result<Brief, String> {
     let mut cmd = ytdlp(&app)?;
     let out = tauri::async_runtime::spawn_blocking(move || {
-        cmd.args(["--no-playlist", "--flat-playlist", "--socket-timeout", "10", "--print", "extractor_key"])
-            .arg(url)
-            .output()
+        cmd.args([
+            "--no-playlist",
+            "--flat-playlist",
+            "--playlist-items",
+            "1",
+            "--skip-download",
+            "--socket-timeout",
+            "6",
+            "--extractor-args",
+            "youtube:player_skip=js,configs",
+            "--print",
+            "%(.{title,thumbnail,uploader,channel,duration})j",
+        ])
+        .arg(url)
+        .output()
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    if out.status.success() { Ok(()) } else { Err(last_error(&String::from_utf8_lossy(&out.stderr))) }
+    if !out.status.success() {
+        return Err(last_error(&String::from_utf8_lossy(&out.stderr)));
+    }
+    let line = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").to_string();
+    let v: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+    Ok(Brief {
+        title: v["title"].as_str().unwrap_or("Untitled").into(),
+        thumbnail: v["thumbnail"].as_str().map(Into::into),
+        uploader: v["uploader"].as_str().or_else(|| v["channel"].as_str()).map(Into::into),
+        duration: v["duration"].as_f64(),
+    })
 }
 
 fn last_error(stderr: &str) -> String {

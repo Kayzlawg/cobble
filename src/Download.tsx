@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "./Icon";
 import { Seg, clock, size } from "./ui";
-import type { Info, NewJob, Plan, Req, Stream } from "./types";
+import type { Brief, Info, NewJob, Plan, Req, Stream } from "./types";
 
 const PRESETS = [
   { id: "ae", name: "After Effects ready", sub: "H.264 MP4" },
@@ -84,6 +84,7 @@ export default function Download({
   const [quality, setQuality] = useState("best");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [check, setCheck] = useState<"idle" | "checking" | "ok" | "bad">("idle");
+  const [brief, setBrief] = useState<Brief | null>(null);
   const latest = useRef("");
 
   const isList = !!info && info.entries.length > 0;
@@ -94,6 +95,8 @@ export default function Download({
   const defAudio = info?.audios.find((s) => s.codec === "aac") ?? info?.audios[0] ?? null;
   const heights = info?.videos.filter((s, i, a) => a.findIndex((x) => heightOf(x) === heightOf(s)) === i) ?? [];
   const mixedList = /[?&]list=/.test(url) && /[?&]v=/.test(url);
+  const listOnly = /[?&]list=/.test(url) && !/[?&]v=/.test(url);
+  const head = info ?? (listOnly ? null : brief);
 
   useEffect(() => {
     if (!info || isList || (!vid && !aid)) return;
@@ -105,26 +108,40 @@ export default function Download({
     latest.current = v;
     setUrl(v);
     setInfo(null);
+    setBrief(null);
     setError("");
     setCheck("idle");
   }
 
-  // Runs on paste. Only confirms the link is reachable and readable by yt-dlp; video details load on submit.
+  // Confirms the link is readable by yt-dlp and loads name, duration and thumbnail; formats load on submit.
   async function checkLink(link: string) {
     if (!looksLikeLink(link)) {
       setCheck("bad");
       setError(NOT_A_LINK);
-      return;
+      return false;
     }
     setCheck("checking");
     try {
-      await invoke("check_link", { url: link });
-      if (latest.current === link) setCheck("ok");
+      const b = await invoke<Brief>("check_link", { url: link });
+      if (latest.current !== link) return false;
+      setBrief(b);
+      setCheck("ok");
+      return true;
     } catch (e) {
-      if (latest.current !== link) return;
-      setCheck("bad");
-      setError(String(e));
+      if (latest.current === link) {
+        setCheck("bad");
+        setError(String(e));
+      }
+      return false;
     }
+  }
+
+  // Enter and the button wait for the check: blocked while it runs or after it failed, and run it first if the link was typed.
+  async function submit() {
+    const link = url.trim();
+    if (!link || fetching || check === "checking" || check === "bad") return;
+    if (check === "idle" && !(await checkLink(link))) return;
+    fetchInfo();
   }
 
   async function fetchInfo(playlist = false) {
@@ -284,7 +301,7 @@ export default function Download({
         className="url"
         onSubmit={(e) => {
           e.preventDefault();
-          fetchInfo();
+          submit();
         }}
       >
         <Icon name="link" size={17} />
@@ -315,7 +332,7 @@ export default function Download({
         {fetching ? (
           <span className="spin" aria-label="Loading" />
         ) : (
-          <button type="submit" className="submit" aria-label="Load link" disabled={!url.trim()}>
+          <button type="submit" className="submit" aria-label="Load link" disabled={!url.trim() || check === "checking" || check === "bad"}>
             <Icon name="arrow" size={16} />
           </button>
         )}
@@ -334,7 +351,7 @@ export default function Download({
         </button>
       )}
 
-      {fetching && (
+      {fetching && !head && (
         <div className="head" aria-hidden="true">
           <div className="thumb skel" />
           <div className="titles">
@@ -344,17 +361,17 @@ export default function Download({
         </div>
       )}
 
-      {info && (
+      {head && (
         <div className="head">
           <div className="thumb">
-            {info.thumbnail ? <img src={info.thumbnail} alt="" /> : <Icon name="play" size={20} />}
+            {head.thumbnail ? <img src={head.thumbnail} alt="" /> : <Icon name="play" size={20} />}
           </div>
           <div className="titles">
-            <div className="t">{info.title}</div>
+            <div className="t">{head.title}</div>
             <div className="s">
               {isList
-                ? `${info.entries.length} videos`
-                : [info.uploader, info.duration ? clock(info.duration) : null].filter(Boolean).join(", ")}
+                ? `${info!.entries.length} videos`
+                : [head.uploader, head.duration ? clock(head.duration) : null].filter(Boolean).join(", ")}
             </div>
           </div>
         </div>

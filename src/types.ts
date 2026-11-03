@@ -10,6 +10,13 @@ export type Stream = {
 
 export type Item = { title: string; url: string; duration: number | null };
 
+export type Brief = {
+  title: string;
+  thumbnail: string | null;
+  uploader: string | null;
+  duration: number | null;
+};
+
 export type Info = {
   title: string;
   thumbnail: string | null;
