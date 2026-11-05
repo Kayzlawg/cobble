@@ -38,6 +38,7 @@ export type Req = {
   preset: string;
   duration: number | null;
   label: string;
+  template?: string;
 };
 
 export type CReq = { path: string; preset: string; codec: string; max_height: number | null; gpu: boolean };
@@ -80,6 +81,12 @@ export type Job = {
   entry?: Entry;
   req?: Req;
   creq?: CReq;
+  // Captured when the job is added, so the queue can show them without fetching again.
+  thumb?: string | null;
+  author?: string | null;
+  duration?: number | null;
+  // Set when the job stops being live (done, failed or cancelled), in ms.
+  endedAt?: number;
 };
 
-export type NewJob = Pick<Job, "kind" | "title" | "label" | "est" | "req" | "creq">;
+export type NewJob = Pick<Job, "kind" | "title" | "label" | "est" | "req" | "creq" | "thumb" | "author" | "duration">;

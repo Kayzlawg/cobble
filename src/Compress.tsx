@@ -108,7 +108,9 @@ export default function Compress({ dir, onChangeDir, onAdd }: { dir: string; onC
               <span className="n ell" title={p}>
                 {name(p)}
               </span>
-              {p in meta ? <small>{size(meta[p]?.size ?? null)}</small> : <span className="spin" aria-label="Calculating size" />}
+              <span className="cell">
+                {p in meta ? <small>{size(meta[p]?.size ?? null)}</small> : <span className="spin" aria-label="Calculating size" />}
+              </span>
               <button className="icon" aria-label="Remove" onClick={() => leave(p, () => setFiles((f) => f.filter((x) => x !== p)))}>
                 <Icon name="x" />
               </button>

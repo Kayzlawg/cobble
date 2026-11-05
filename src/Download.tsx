@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "./Icon";
-import { Seg, clock, size } from "./ui";
+import { QUALITY, Seg, clock, looksLikeLink, size, type Prefs } from "./ui";
 import type { Brief, Info, NewJob, Plan, Req, Stream } from "./types";
 
 const PRESETS = [
@@ -11,15 +11,6 @@ const PRESETS = [
   { id: "mp3", name: "MP3", sub: "Audio only" },
 ];
 
-const QUALITY = [
-  { value: "best", text: "Best" },
-  { value: "1080", text: "1080p" },
-  { value: "720", text: "720p" },
-  { value: "480", text: "480p" },
-  { value: "audio", text: "Audio only" },
-];
-
-const looksLikeLink = (s: string) => /^https?:\/\/[^\s/]+\.[^\s/]+/i.test(s);
 const NOT_A_LINK = "That doesn't look like a link. It should start with https://";
 
 const heightOf =(s: Stream) => s.label.split(" ")[0];
@@ -66,10 +57,17 @@ export default function Download({
   dir,
   onChangeDir,
   onAdd,
+  incoming,
+  onLink,
+  prefs,
 }: {
+  prefs: Prefs;
   dir: string;
   onChangeDir: () => void;
   onAdd: (jobs: NewJob[]) => void;
+  // A link handed in from outside (clipboard, Ctrl+V). `n` changes on every send, so the same link can arrive twice.
+  incoming: { url: string; n: number } | null;
+  onLink: (url: string) => void;
 }) {
   const [tab, setTab] = useState<"formats" | "advanced">("formats");
   const [merge, setMerge] = useState(false);
@@ -106,6 +104,7 @@ export default function Download({
   // Any edit drops the previous result and check, so what is on screen always matches the box.
   function edit(v: string) {
     latest.current = v;
+    onLink(v);
     setUrl(v);
     setInfo(null);
     setBrief(null);
@@ -136,12 +135,31 @@ export default function Download({
     }
   }
 
+  useEffect(() => {
+    if (!incoming) return;
+    edit(incoming.url);
+    checkLink(incoming.url);
+  }, [incoming]);
+
   // Enter and the button wait for the check: blocked while it runs or after it failed, and run it first if the link was typed.
+  // Enter again once the formats are loaded adds the download.
   async function submit() {
     const link = url.trim();
     if (!link || fetching || check === "checking" || check === "bad") return;
+    if (info) return isList ? addList() : addSingle();
     if (check === "idle" && !(await checkLink(link))) return;
     fetchInfo();
+  }
+
+  // The default quality picks the tallest video at or under the chosen height, preferring H.264. "Audio only" picks none.
+  function defaultVideo(i: Info) {
+    if (prefs.quality === "audio" && i.audios.length) return null;
+    const max = Number(prefs.quality);
+    const h = (s: Stream) => parseInt(heightOf(s));
+    const fit = max ? i.videos.filter((s) => h(s) <= max) : [];
+    const top = fit.length ? Math.max(...fit.map(h)) : 0;
+    const pool = top ? fit.filter((s) => h(s) === top) : i.videos;
+    return pool.find((s) => s.codec === "h264") ?? pool[0] ?? null;
   }
 
   async function fetchInfo(playlist = false) {
@@ -164,13 +182,13 @@ export default function Download({
       setInfo(i);
       if (i.entries.length > 0) {
         setPicked(new Set(i.entries.map((e) => e.url)));
-        setQuality("best");
-        setPreset("ae");
+        setQuality(prefs.quality);
+        setPreset(prefs.quality === "audio" && prefs.preset === "prores" ? "ae" : prefs.preset);
       } else {
-        const v = i.videos.find((s) => s.codec === "h264") ?? i.videos[0] ?? null;
+        const v = defaultVideo(i);
         setVid(v?.id ?? null);
         setAid(v?.audio_codec ? null : (i.audios.find((s) => s.codec === "aac") ?? i.audios[0] ?? null)?.id ?? null);
-        setPreset(v ? "ae" : "mp3");
+        setPreset(v ? prefs.preset : "mp3");
       }
     } catch (e) {
       setCheck("bad");
@@ -217,8 +235,9 @@ export default function Download({
       preset,
       duration: info.duration,
       label,
+      template: prefs.template,
     };
-    onAdd([{ kind: "download", title: info.title, label, req }]);
+    onAdd([{ kind: "download", title: info.title, label, req, thumb: info.thumbnail, author: info.uploader, duration: info.duration }]);
     reset();
   }
 
@@ -235,6 +254,8 @@ export default function Download({
         kind: "download",
         title: e.title,
         label,
+        author: info.uploader,
+        duration: e.duration,
         req: {
           url: e.url,
           title: e.title,
@@ -246,6 +267,7 @@ export default function Download({
           preset,
           duration: e.duration,
           label,
+          template: prefs.template,
         },
       }));
     if (jobs.length) {
@@ -318,24 +340,29 @@ export default function Download({
           spellCheck={false}
           autoFocus
         />
-        {check === "checking" && <span className="spin" aria-label="Checking link" />}
-        {check === "ok" && (
-          <span className="state ok" title="Link works">
-            <Icon name="circleCheck" size={16} />
-          </span>
-        )}
-        {check === "bad" && (
-          <span className="state no" title="Link can't be loaded">
-            <Icon name="alert" size={16} />
-          </span>
-        )}
-        {fetching ? (
-          <span className="spin" aria-label="Loading" />
-        ) : (
-          <button type="submit" className="submit" aria-label="Load link" disabled={!url.trim() || check === "checking" || check === "bad"}>
-            <Icon name="arrow" size={16} />
-          </button>
-        )}
+        {/* Two fixed slots, always rendered, so the spinner, the check and the button never move. */}
+        <span className="slot">
+          {check === "checking" && <span className="spin" aria-label="Checking link" />}
+          {check === "ok" && (
+            <span className="state ok" title="Link works">
+              <Icon name="circleCheck" size={16} />
+            </span>
+          )}
+          {check === "bad" && (
+            <span className="state no" title="Link can't be loaded">
+              <Icon name="alert" size={16} />
+            </span>
+          )}
+        </span>
+        <span className="slot">
+          {fetching ? (
+            <span className="spin" aria-label="Loading" />
+          ) : (
+            <button type="submit" className="submit" aria-label="Load link" disabled={!url.trim() || check === "checking" || check === "bad"}>
+              <Icon name="arrow" size={16} />
+            </button>
+          )}
+        </span>
       </form>
 
       {error && (

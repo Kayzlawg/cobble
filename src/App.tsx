@@ -4,13 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Icon, type IconName } from "./Icon";
 import Download from "./Download";
 import Compress from "./Compress";
 import Queue from "./Queue";
 import TitleBar from "./TitleBar";
-import { Thumb, size, useLeave } from "./ui";
+import { QUALITY, Seg, Thumb, day, loadPrefs, looksLikeLink, savePrefs, size, useLeave, type Prefs } from "./ui";
 import type { Entry, Job, NewJob, Progress } from "./types";
 import "./App.css";
 
@@ -27,6 +28,15 @@ export default function App() {
   const [updating, setUpdating] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [leaving, leave] = useLeave();
+  const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+  const setPref = (p: Partial<Prefs>) => {
+    const n = { ...prefs, ...p };
+    setPrefs(n);
+    savePrefs(n);
+  };
+  const [incoming, setIncoming] = useState<{ url: string; n: number } | null>(null);
+  // The last link the Download box held or the clipboard offered, so the same one is not offered twice.
+  const seen = useRef("");
   const nextId = useRef(1);
   const nextToast = useRef(1);
 
@@ -71,7 +81,7 @@ export default function App() {
         patchRunning((j) => (j.status === "cancelling" ? j : { ...j, progress: e.payload })),
       ),
       listen<Entry>("done", (e) => {
-        patchRunning((j) => ({ ...j, status: "done", entry: e.payload, progress: null }));
+        patchRunning((j) => ({ ...j, status: "done", entry: e.payload, progress: null, endedAt: Date.now() }));
         setHistory((h) => [e.payload, ...h]);
         toast({
           icon: "circleCheck",
@@ -82,13 +92,53 @@ export default function App() {
       listen<string>("failed", (e) =>
         patchRunning((j) =>
           e.payload === "Cancelled"
-            ? { ...j, status: "cancelled", progress: null }
-            : { ...j, status: "failed", error: e.payload, progress: null },
+            ? { ...j, status: "cancelled", progress: null, endedAt: Date.now() }
+            : { ...j, status: "failed", error: e.payload, progress: null, endedAt: Date.now() },
         ),
       ),
     ];
     return () => off.forEach((p) => p.then((f) => f()));
   }, []);
+
+  const loadLink = useCallback((url: string) => {
+    setPage("download");
+    setIncoming((i) => ({ url, n: (i?.n ?? 0) + 1 }));
+  }, []);
+
+  // Offer a copied link when the window gets focus. A blocked or empty clipboard stays silent.
+  useEffect(() => {
+    const onFocus = async () => {
+      try {
+        // The native plugin, because the webview's own clipboard API asks for permission every launch.
+        const t = ((await readText()) ?? "").trim();
+        if (!looksLikeLink(t) || t === seen.current) return;
+        seen.current = t;
+        toast({ icon: "link", text: "Load the link you copied?", action: { label: "Load", run: () => loadLink(t) } }, 10000);
+      } catch {}
+    };
+    // Ctrl+V outside a text field loads the link. Ctrl+1 to 5 switch pages.
+    const onPaste = (e: ClipboardEvent) => {
+      if ((e.target as HTMLElement | null)?.closest("input, textarea")) return;
+      const t = e.clipboardData?.getData("text").trim() ?? "";
+      if (looksLikeLink(t)) loadLink(t);
+    };
+    const pages: Page[] = ["download", "compress", "queue", "history", "settings"];
+    const onKey = (e: KeyboardEvent) => {
+      const p = pages[Number(e.key) - 1];
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && p) {
+        e.preventDefault();
+        setPage(p);
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("paste", onPaste);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("paste", onPaste);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [toast, loadLink]);
 
   // The backend runs one job at a time, so the queue hands it the next one whenever nothing is running.
   useEffect(() => {
@@ -97,7 +147,7 @@ export default function App() {
     if (!next) return;
     setJobs((js) => js.map((j) => (j.id === next.id ? { ...j, status: "running", progress: null } : j)));
     invoke(next.kind === "download" ? "start_download" : "start_compress", { req: next.kind === "download" ? next.req : next.creq }).catch(
-      (e) => setJobs((js) => js.map((j) => (j.id === next.id ? { ...j, status: "failed", error: String(e) } : j))),
+      (e) => setJobs((js) => js.map((j) => (j.id === next.id ? { ...j, status: "failed", error: String(e), endedAt: Date.now() } : j))),
     );
   }, [jobs]);
 
@@ -114,6 +164,29 @@ export default function App() {
     invoke("cancel_download");
   };
   const removeJob = (id: number) => setJobs((js) => js.filter((j) => j.id !== id));
+  // Waiting jobs are cancelled outright; the running one goes through the normal cancel.
+  const cancelAll = () => {
+    const running = jobs.some((j) => j.status === "running");
+    setJobs((js) =>
+      js.map((j) =>
+        j.status === "queued"
+          ? { ...j, status: "cancelled", endedAt: Date.now() }
+          : j.status === "running"
+            ? { ...j, status: "cancelling", progress: null }
+            : j,
+      ),
+    );
+    if (running) invoke("cancel_download");
+  };
+  // Moves a waiting job in front of the other waiting jobs.
+  const runNext = (id: number) =>
+    setJobs((js) => {
+      const j = js.find((x) => x.id === id)!;
+      const rest = js.filter((x) => x.id !== id);
+      const i = rest.findIndex((x) => x.status === "queued");
+      rest.splice(i < 0 ? rest.length : i, 0, j);
+      return rest;
+    });
 
   async function changeDir() {
     const d = await open({ directory: true, defaultPath: dir });
@@ -138,6 +211,24 @@ export default function App() {
   };
 
   const active = jobs.filter((j) => j.status === "queued" || live(j)).length;
+
+  // When a batch of two or more finishes, say so once and point at the last file.
+  const batch = useRef({ active: 0, start: 0 });
+  useEffect(() => {
+    const b = batch.current;
+    if (active > 0 && b.active === 0) b.start = Date.now();
+    if (active === 0 && b.active > 0) {
+      const done = jobs.filter((j) => j.status === "done" && j.entry && (j.endedAt ?? 0) >= b.start);
+      if (done.length > 1)
+        toast({
+          icon: "circleCheck",
+          text: `All ${done.length} finished`,
+          action: { label: "Show", run: () => revealItemInDir(done[done.length - 1].entry!.path) },
+        });
+    }
+    b.active = active;
+  }, [active]);
+
   const nav = (p: Page, label: string, icon: IconName, count = 0) => (
     <button className={`nav ${page === p ? "on" : ""}`} onClick={() => setPage(p)}>
       <Icon name={icon} />
@@ -163,13 +254,32 @@ export default function App() {
       <main>
         {/* Kept mounted so a fetched link or picked files survive a trip to another page. */}
         <div hidden={page !== "download"}>
-          <Download dir={dir} onChangeDir={changeDir} onAdd={add} />
+          <Download
+            dir={dir}
+            onChangeDir={changeDir}
+            onAdd={add}
+            incoming={incoming}
+            prefs={prefs}
+            onLink={(u) => {
+              if (u) seen.current = u;
+            }}
+          />
         </div>
         <div hidden={page !== "compress"}>
           <Compress dir={dir} onChangeDir={changeDir} onAdd={add} />
         </div>
 
-        {page === "queue" && <Queue jobs={jobs} onCancel={cancel} onRemove={removeJob} onRetry={retry} onClear={clearFinished} />}
+        {page === "queue" && (
+          <Queue
+            jobs={jobs}
+            onCancel={cancel}
+            onCancelAll={cancelAll}
+            onRemove={removeJob}
+            onRetry={retry}
+            onRunNext={runNext}
+            onClear={clearFinished}
+          />
+        )}
 
         {page === "history" && (
           <>
@@ -185,7 +295,7 @@ export default function App() {
                       <div className="t">{h.title}</div>
                       <div className="s">
                         {h.format}, {h.from_size ? `${size(h.from_size)} to ${size(h.size)}` : size(h.size)},{" "}
-                        {new Date(h.at).toLocaleDateString()}
+                        {day(h.at)}
                       </div>
                     </div>
                     {h.req && (
@@ -227,6 +337,32 @@ export default function App() {
                 <button className="ghost" onClick={update} disabled={updating}>
                   {updating ? "Updating..." : "Update"}
                 </button>
+              </div>
+            </div>
+            <div className="settings">
+              <Seg
+                label="Default output"
+                value={prefs.preset}
+                onChange={(preset) => setPref({ preset })}
+                options={[
+                  { value: "ae", text: "After Effects ready" },
+                  { value: "prores", text: "ProRes 422" },
+                  { value: "keep", text: "Keep original" },
+                ]}
+              />
+              <Seg label="Default quality" value={prefs.quality} onChange={(quality) => setPref({ quality })} options={QUALITY} />
+              <div className="setting">
+                <div className="colhead">Filename</div>
+                <div className="url tpl">
+                  <input
+                    value={prefs.template}
+                    onChange={(e) => setPref({ template: e.target.value })}
+                    placeholder="{title}"
+                    spellCheck={false}
+                    aria-label="Filename template"
+                  />
+                </div>
+                <small className="hint">Use {"{title}"}, {"{uploader}"} and {"{date}"}. Without {"{title}"}, the video id is added.</small>
               </div>
             </div>
           </>

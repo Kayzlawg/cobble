@@ -14,7 +14,8 @@
     "opener:allow-reveal-item-in-dir",
     "dialog:default",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "clipboard-manager:allow-read-text"
   ]
 }
 

@@ -14,6 +14,7 @@ const paths = {
   list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
   arrow: "M5 12h14M13 6l6 6-6 6",
   minus: "M5 12h14",
+  up: "M12 19V5M5 12l7-7 7 7",
   square: "M5 5h14v14H5z",
   restore: "M8 8h11v11H8zM5 16V5h11",
   alert:"M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 8v4M12 16h.01",

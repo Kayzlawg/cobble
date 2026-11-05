@@ -55,8 +55,42 @@ export function useLeave(ms = 180) {
   return [leaving, leave] as const;
 }
 
+export const QUALITY = [
+  { value: "best", text: "Best" },
+  { value: "1080", text: "1080p" },
+  { value: "720", text: "720p" },
+  { value: "480", text: "480p" },
+  { value: "audio", text: "Audio only" },
+];
+
+// Defaults for new downloads, saved in localStorage.
+export type Prefs = { preset: string; quality: string; template: string };
+const DEFAULT_PREFS: Prefs = { preset: "ae", quality: "best", template: "{title}" };
+
+export function loadPrefs(): Prefs {
+  try {
+    return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem("prefs") ?? "{}") };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
+export function savePrefs(p: Prefs) {
+  try {
+    localStorage.setItem("prefs", JSON.stringify(p));
+  } catch {}
+}
+
+export const looksLikeLink = (s: string) => /^https?:\/\/[^\s/]+\.[^\s/]+/i.test(s);
+
 export const size = (b: number | null) =>
   b == null ? "" : b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`;
+
+// "Nov 4", with the year only when it is not this year.
+export const day = (ms: number) => {
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+};
 
 export const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 

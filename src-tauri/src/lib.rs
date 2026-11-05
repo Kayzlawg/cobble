@@ -78,6 +78,28 @@ struct Request {
     preset: String,
     duration: Option<f64>,
     label: String,
+    // Filename template with {title}, {uploader} and {date}. Empty or missing means the title.
+    #[serde(default)]
+    template: Option<String>,
+}
+
+// Turns the filename template into a yt-dlp output name, without the extension.
+// Characters Windows or yt-dlp would read as path or field syntax are dropped, so the template cannot leave the folder.
+// Without {title}, the video id is added so different videos do not overwrite each other.
+fn out_name(template: Option<&str>) -> String {
+    let t: String = template.unwrap_or("").chars().filter(|c| !"/\\%:*?\"<>|".contains(*c)).collect();
+    let t = t.trim();
+    if t.is_empty() {
+        return "%(title).150B".into();
+    }
+    let mut n = t
+        .replace("{title}", "%(title).150B")
+        .replace("{uploader}", "%(uploader).60B")
+        .replace("{date}", "%(upload_date)s");
+    if !t.contains("{title}") {
+        n.push_str(" %(id)s");
+    }
+    n
 }
 
 #[derive(Deserialize)]
@@ -560,7 +582,7 @@ fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<
             "after_move:filepath",
             "-o",
         ])
-        .arg(dir.join("%(title).150B.%(ext)s"))
+        .arg(dir.join(format!("{}.%(ext)s", out_name(req.template.as_deref()))))
         .arg(&req.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -848,6 +870,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Running::default())
         .invoke_handler(tauri::generate_handler![
             fetch_info,
@@ -886,6 +909,16 @@ mod tests {
         assert_eq!(p.ext, "");
         let p = convert_plan("mp3", None, Some("mp3"));
         assert_eq!((p.audio, p.ext), ("copy", "mp3"));
+    }
+
+    #[test]
+    fn builds_filename_from_template() {
+        assert_eq!(out_name(None), "%(title).150B");
+        assert_eq!(out_name(Some("  ")), "%(title).150B");
+        assert_eq!(out_name(Some("{uploader} - {title}")), "%(uploader).60B - %(title).150B");
+        // No {title}: the id keeps files apart. Path and field syntax is stripped.
+        assert_eq!(out_name(Some("{date}")), "%(upload_date)s %(id)s");
+        assert_eq!(out_name(Some("..\\x/%(id)s {title}")), "..x(id)s %(title).150B");
     }
 
     #[test]

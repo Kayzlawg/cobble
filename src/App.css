@@ -245,8 +245,71 @@ h1 {
   border-color: var(--accent);
 }
 
+.url.tpl {
+  margin-top: 6px;
+  height: 36px;
+}
+
+.hint {
+  display: block;
+  margin-top: 6px;
+}
+
+/* A fixed box for anything that swaps between a spinner, an icon and a button, so each sits in the same spot. */
+.slot {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.slot .spin {
+  vertical-align: 0;
+}
+
 .state {
   display: flex;
+}
+
+/* Right-aligned cell for a value that may still be loading (a size next to its spinner). */
+.cell {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 64px;
+  flex-shrink: 0;
+}
+
+.acts {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.when {
+  min-width: 64px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.s.stat {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.s.stat svg {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.mark.ok {
+  color: var(--accent);
+}
+
+.mark.no {
+  color: var(--danger);
 }
 
 .state.ok {
@@ -738,6 +801,10 @@ small {
   margin-top: 16px;
   font-size: 13px;
   color: var(--dim);
+}
+
+.list.sec {
+  margin-top: 6px;
 }
 
 .entries {
