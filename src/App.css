@@ -875,3 +875,23 @@ small {
   max-width: none;
   margin-top: 8px;
 }
+
+.trim {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.url.tpl small {
+  flex: none;
+}
+
+.hint.bad {
+  color: var(--danger);
+}
+
+.tabs ~ .colhead,
+.tabs ~ .setting,
+.tabs ~ .url.tpl {
+  margin-top: 14px;
+}

@@ -39,6 +39,10 @@ export type Req = {
   duration: number | null;
   label: string;
   template?: string;
+  start?: number | null;
+  end?: number | null;
+  subs?: string | null;
+  sub_lang?: string | null;
 };
 
 export type CReq = { path: string; preset: string; codec: string; max_height: number | null; gpu: boolean };

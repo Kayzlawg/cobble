@@ -81,6 +81,16 @@ struct Request {
     // Filename template with {title}, {uploader} and {date}. Empty or missing means the title.
     #[serde(default)]
     template: Option<String>,
+    // Clip in seconds. Either end may be missing: no start means the beginning, no end means the end.
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
+    // "embed" puts subtitles in the video, "file" saves an .srt next to it. Ignored for audio presets and clips.
+    #[serde(default)]
+    subs: Option<String>,
+    #[serde(default)]
+    sub_lang: Option<String>,
 }
 
 // Turns the filename template into a yt-dlp output name, without the extension.
@@ -215,6 +225,7 @@ fn afam(c: &str) -> &'static str {
         c if c.starts_with("mp4a") || c.starts_with("aac") => "aac",
         c if c.starts_with("opus") => "opus",
         c if c.starts_with("mp3") => "mp3",
+        c if c.starts_with("flac") => "flac",
         c if c.starts_with("vorbis") => "vorbis",
         _ => "other",
     }
@@ -229,6 +240,7 @@ fn pretty(fam: &str, raw: &str) -> String {
         "aac" => "AAC".into(),
         "opus" => "Opus".into(),
         "mp3" => "MP3".into(),
+        "flac" => "FLAC".into(),
         "vorbis" => "Vorbis".into(),
         _ => raw.split('.').next().unwrap_or(raw).to_uppercase(),
     }
@@ -407,9 +419,41 @@ fn convert_plan(preset: &str, vc: Option<&str>, ac: Option<&str>) -> Plan {
         ("prores", true) => (conv(vc), conv(ac), "ProRes 422", "PCM", "mov"),
         ("prores", false) => ("none", conv(ac), "", "WAV", "wav"),
         ("mp3", _) => ("none", act(ac, "mp3"), "", "MP3", "mp3"),
+        ("wav", _) => ("none", conv(ac), "", "WAV", "wav"),
+        ("flac", _) => ("none", act(ac, "flac"), "", "FLAC", "flac"),
+        ("aac", _) => ("none", act(ac, "aac"), "", "AAC", "m4a"),
         _ => (keep(vc), keep(ac), "", "", ""),
     };
     Plan { video, audio, video_to, audio_to, ext }
+}
+
+// yt-dlp --download-sections value for a clip, or None for the whole video.
+fn trim_section(start: Option<f64>, end: Option<f64>) -> Option<String> {
+    if start.is_none() && end.is_none() {
+        return None;
+    }
+    let s = start.filter(|s| s.is_finite() && *s >= 0.0).unwrap_or(0.0);
+    let e = end.filter(|e| e.is_finite() && *e > s).map_or("inf".to_string(), |e| e.to_string());
+    Some(format!("*{s}-{e}"))
+}
+
+fn is_clip(req: &Request) -> bool {
+    req.start.is_some() || req.end.is_some()
+}
+
+fn wants_subs(req: &Request) -> Option<&str> {
+    let audio = matches!(req.preset.as_str(), "mp3" | "wav" | "flac" | "aac");
+    match req.subs.as_deref() {
+        Some(m @ ("embed" | "file")) if !audio && !is_clip(req) => Some(m),
+        _ => None,
+    }
+}
+
+// Language codes only, so the value cannot become another yt-dlp option or a regex. Defaults to English.
+fn sub_langs(lang: Option<&str>) -> String {
+    let l: String = lang.unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let l = l.trim_matches('-');
+    format!("{}.*,-live_chat", if l.is_empty() { "en" } else { l })
 }
 
 fn format_selector(req: &Request) -> String {
@@ -512,9 +556,15 @@ fn convert(app: &AppHandle, running: &Running, req: &Request, src: &Path) -> Res
         ("none", _) => &["-an"],
         (_, "prores") => &["-c:a", "pcm_s16le"],
         (_, "mp3") => &["-c:a", "libmp3lame", "-q:a", "0"],
+        (_, "wav") => &["-c:a", "pcm_s16le"],
+        (_, "flac") => &["-c:a", "flac"],
         _ => &["-c:a", "aac", "-b:a", "256k"],
     };
     let mut mid: Vec<&str> = [video, audio].concat();
+    // Subtitles embedded in the mkv are carried over, as text tracks mp4 and mov accept.
+    if wants_subs(req) == Some("embed") && plan.video != "none" {
+        mid.extend(["-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-c:s", "mov_text"]);
+    }
     if matches!(plan.ext, "mp4" | "m4a") {
         mid.extend(["-movflags", "+faststart"]);
     }
@@ -568,11 +618,22 @@ fn spawn_job(
 
 fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<Entry, String> {
     let dir = download_dir(app)?;
-    let mut child = ytdlp(app)?
-        .arg("--no-playlist")
+    let mut cmd = ytdlp(app)?;
+    cmd.arg("--no-playlist")
         .args(["-f", &format_selector(&req)])
         .args(["--merge-output-format", "mkv", "--force-overwrites"])
-        .args(["--windows-filenames", "--newline", "--progress"])
+        .args(["--windows-filenames", "--newline", "--progress"]);
+    if let Some(sec) = trim_section(req.start, req.end) {
+        cmd.args(["--download-sections", &sec, "--force-keyframes-at-cuts"]);
+    }
+    if let Some(mode) = wants_subs(&req) {
+        cmd.args(["--write-subs", "--write-auto-subs", "--sub-langs", &sub_langs(req.sub_lang.as_deref())]);
+        cmd.args(["--convert-subs", "srt"]);
+        if mode == "embed" {
+            cmd.arg("--embed-subs");
+        }
+    }
+    let mut child = cmd
         .args([
             "--progress-template",
             "download:%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
@@ -909,6 +970,23 @@ mod tests {
         assert_eq!(p.ext, "");
         let p = convert_plan("mp3", None, Some("mp3"));
         assert_eq!((p.audio, p.ext), ("copy", "mp3"));
+        let p = convert_plan("wav", None, Some("wav"));
+        assert_eq!((p.audio, p.ext), ("convert", "wav"));
+        let p = convert_plan("flac", None, Some("flac"));
+        assert_eq!((p.audio, p.ext), ("copy", "flac"));
+        let p = convert_plan("aac", None, Some("opus"));
+        assert_eq!((p.audio, p.ext), ("convert", "m4a"));
+    }
+
+    #[test]
+    fn builds_clip_and_subtitle_options() {
+        assert_eq!(trim_section(None, None), None);
+        assert_eq!(trim_section(Some(30.0), Some(75.5)).as_deref(), Some("*30-75.5"));
+        assert_eq!(trim_section(None, Some(10.0)).as_deref(), Some("*0-10"));
+        assert_eq!(trim_section(Some(5.0), None).as_deref(), Some("*5-inf"));
+        assert_eq!(sub_langs(None), "en.*,-live_chat");
+        assert_eq!(sub_langs(Some("--exec x")), "execx.*,-live_chat");
+        assert_eq!(sub_langs(Some("pt-BR")), "pt-BR.*,-live_chat");
     }
 
     #[test]

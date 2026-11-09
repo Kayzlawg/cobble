@@ -1,15 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Icon } from "./Icon";
-import { QUALITY, Seg, clock, looksLikeLink, size, type Prefs } from "./ui";
+import { QUALITY, Seg, clock, looksLikeLink, parseTime, size, type Prefs } from "./ui";
 import type { Brief, Info, NewJob, Plan, Req, Stream } from "./types";
 
 const PRESETS = [
   { id: "ae", name: "After Effects ready", sub: "H.264 MP4" },
   { id: "prores", name: "ProRes 422", sub: "MOV" },
-  { id: "keep", name: "Keep original", sub: "No conversion" },
   { id: "mp3", name: "MP3", sub: "Audio only" },
+  { id: "wav", name: "WAV", sub: "Lossless, large" },
+  { id: "flac", name: "FLAC", sub: "Lossless, smaller" },
+  { id: "aac", name: "AAC", sub: "M4A" },
+  { id: "keep", name: "Keep original", sub: "No conversion" },
 ];
+
+const AUDIO = ["mp3", "wav", "flac", "aac"];
+const isAudio = (p: string) => AUDIO.includes(p);
 
 const NOT_A_LINK = "That doesn't look like a link. It should start with https://";
 
@@ -83,6 +89,10 @@ export default function Download({
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [check, setCheck] = useState<"idle" | "checking" | "ok" | "bad">("idle");
   const [brief, setBrief] = useState<Brief | null>(null);
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [subs, setSubs] = useState<"off" | "embed" | "file">("off");
+  const [subLang, setSubLang] = useState("en");
   const latest = useRef("");
 
   const isList = !!info && info.entries.length > 0;
@@ -95,6 +105,22 @@ export default function Download({
   const mixedList = /[?&]list=/.test(url) && /[?&]v=/.test(url);
   const listOnly = /[?&]list=/.test(url) && !/[?&]v=/.test(url);
   const head = info ?? (listOnly ? null : brief);
+
+  // A clip is blank when both boxes are empty. Otherwise start defaults to 0 and a blank end runs to the finish.
+  const t0 = start.trim() ? parseTime(start) : 0;
+  const t1 = end.trim() ? parseTime(end) : null;
+  const clipped = !!start.trim() || !!end.trim();
+  const clipError = !clipped
+    ? ""
+    : Number.isNaN(t0) || Number.isNaN(t1)
+      ? "Use a time like 1:30 or 90"
+      : t1 != null && t1 <= t0
+        ? "End must be after start"
+        : info?.duration && t0 >= info.duration
+          ? "Start is past the end of the video"
+          : "";
+  const clipLen = !clipped || clipError ? null : t1 != null ? t1 - t0 : info?.duration ? info.duration - t0 : null;
+  const audioOut = isAudio(preset);
 
   useEffect(() => {
     if (!info || isList || (!vid && !aid)) return;
@@ -110,6 +136,9 @@ export default function Download({
     setBrief(null);
     setError("");
     setCheck("idle");
+    setStart("");
+    setEnd("");
+    setSubs("off");
   }
 
   // Confirms the link is readable by yt-dlp and loads name, duration and thumbnail; formats load on submit.
@@ -200,15 +229,15 @@ export default function Download({
   function pickHeight(s: Stream) {
     setVid(s.id);
     setAid(s.audio_codec ? null : (defAudio?.id ?? null));
-    if (preset === "mp3") setPreset("ae");
+    if (isAudio(preset)) setPreset("ae");
   }
 
   function pickVideo(id: string | null) {
     const s = info?.videos.find((x) => x.id === id);
     setVid(id);
     if (s?.audio_codec) setAid(null);
-    if (id && preset === "mp3") setPreset("ae");
-    if (!id && preset !== "mp3") setPreset("mp3");
+    if (id && isAudio(preset)) setPreset("ae");
+    if (!id && !isAudio(preset)) setPreset("mp3");
   }
 
   function toggleMerge(on: boolean) {
@@ -221,9 +250,15 @@ export default function Download({
 
   function addSingle() {
     if (!info || !plan) return;
-    const label = [vs ? heightOf(vs) : "", plan.ext ? plan.ext.toUpperCase() : (vs ?? as)?.codec_name]
+    if (clipError) return;
+    const label = [
+      vs ? heightOf(vs) : "",
+      plan.ext ? plan.ext.toUpperCase() : (vs ?? as)?.codec_name,
+      clipped ? `${clock(t0)}-${t1 != null ? clock(t1) : "end"}` : "",
+    ]
       .filter(Boolean)
       .join(" ");
+    const subbed = !!vid && !audioOut && !clipped && subs !== "off";
     const req: Req = {
       url: url.trim(),
       title: info.title,
@@ -233,11 +268,15 @@ export default function Download({
       vc,
       ac,
       preset,
-      duration: info.duration,
+      duration: clipped ? clipLen : info.duration,
       label,
       template: prefs.template,
+      start: clipped ? t0 : null,
+      end: clipped ? t1 : null,
+      subs: subbed ? subs : null,
+      sub_lang: subbed ? subLang.trim() || "en" : null,
     };
-    onAdd([{ kind: "download", title: info.title, label, req, thumb: info.thumbnail, author: info.uploader, duration: info.duration }]);
+    onAdd([{ kind: "download", title: info.title, label, req, thumb: info.thumbnail, author: info.uploader, duration: clipped ? clipLen : info.duration }]);
     reset();
   }
 
@@ -246,7 +285,7 @@ export default function Download({
     const audio = quality === "audio";
     const selector =
       audio ? "ba/b" : quality === "best" ? "bv*+ba/b" : `bv*[height<=${quality}]+ba/b[height<=${quality}]`;
-    const ext = preset === "ae" ? (audio ? "M4A" : "MP4") : preset === "prores" ? "MOV" : preset === "mp3" ? "MP3" : "Original";
+    const ext = preset === "ae" ? (audio ? "M4A" : "MP4") : preset === "prores" ? "MOV" : preset === "mp3" ? "MP3" : preset === "wav" ? "WAV" : preset === "flac" ? "FLAC" : "Original";
     const label = `${QUALITY.find((q) => q.value === quality)!.text} ${ext}`;
     const jobs = info.entries
       .filter((e) => picked.has(e.url))
@@ -279,7 +318,7 @@ export default function Download({
   function setQ(q: string) {
     setQuality(q);
     if (q === "audio" && (preset === "prores")) setPreset("ae");
-    if (q !== "audio" && preset === "mp3") setPreset("ae");
+    if (q !== "audio" && isAudio(preset)) setPreset("ae");
   }
 
   // Total of the picked tracks. A combined video stream already carries its audio. Blank if any needed size is unknown.
@@ -309,6 +348,8 @@ export default function Download({
       ? [
           { value: "ae", text: "M4A" },
           { value: "mp3", text: "MP3" },
+          { value: "wav", text: "WAV" },
+          { value: "flac", text: "FLAC" },
           { value: "keep", text: "Original" },
         ]
       : [
@@ -512,21 +553,79 @@ export default function Download({
               />
             </div>
           ) : (
-            <div className="fmts" role="radiogroup" aria-label="Output">
-              {PRESETS.filter((p) => p.id !== "mp3" || !vid).map((p) => (
-                <button
-                  key={p.id}
-                  className="fmt"
-                  role="radio"
-                  aria-checked={preset === p.id}
-                  onClick={() => setPreset(p.id)}
-                >
-                  <Icon name={preset === p.id ? "circleCheck" : "circle"} size={18} />
-                  <span className="n">{p.name}</span>
-                  <small>{p.sub}</small>
-                </button>
-              ))}
-            </div>
+            <>
+              <div className="fmts" role="radiogroup" aria-label="Output">
+                {PRESETS.filter((p) => (vid ? !isAudio(p.id) : isAudio(p.id) || p.id === "keep")).map((p) => (
+                  <button
+                    key={p.id}
+                    className="fmt"
+                    role="radio"
+                    aria-checked={preset === p.id}
+                    onClick={() => setPreset(p.id)}
+                  >
+                    <Icon name={preset === p.id ? "circleCheck" : "circle"} size={18} />
+                    <span className="n">{p.name}</span>
+                    <small>{p.sub}</small>
+                  </button>
+                ))}
+              </div>
+
+              <div className="colhead">Trim</div>
+              <div className="trim">
+                <label className="url tpl">
+                  <small>Start</small>
+                  <input value={start} onChange={(e) => setStart(e.target.value)} placeholder="0:00" spellCheck={false} aria-label="Trim start" />
+                </label>
+                <label className="url tpl">
+                  <small>End</small>
+                  <input
+                    value={end}
+                    onChange={(e) => setEnd(e.target.value)}
+                    placeholder={info.duration ? clock(info.duration) : "End"}
+                    spellCheck={false}
+                    aria-label="Trim end"
+                  />
+                </label>
+              </div>
+              <small className={`hint ${clipError ? "bad" : ""}`}>
+                {clipError || (clipLen != null ? `Clip length ${clock(clipLen)}. Only this part is downloaded.` : "Leave both empty for the whole video.")}
+              </small>
+
+              {vid && !audioOut && (
+                <>
+                  {clipped ? (
+                    <>
+                      <div className="colhead">Subtitles</div>
+                      <small className="hint">Off while trimming.</small>
+                    </>
+                  ) : (
+                    <>
+                      <Seg
+                        label="Subtitles"
+                        value={subs}
+                        onChange={setSubs}
+                        options={[
+                          { value: "off", text: "Off" },
+                          { value: "embed", text: "Embedded" },
+                          { value: "file", text: "SRT file" },
+                        ]}
+                      />
+                      {subs !== "off" && (
+                        <>
+                          <label className="url tpl">
+                            <small>Language</small>
+                            <input value={subLang} onChange={(e) => setSubLang(e.target.value)} placeholder="en" spellCheck={false} aria-label="Subtitle language" />
+                          </label>
+                          <small className="hint">
+                            Language code such as en, fr or es. Uses auto-captions if there are no uploaded subtitles.
+                          </small>
+                        </>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+            </>
           )}
 
           <div className="foot">
@@ -539,7 +638,7 @@ export default function Download({
               {total && summary ? ", " : ""}
               {summary}
             </small>
-            <button className="go" onClick={addSingle} disabled={!vid && !aid}>
+            <button className="go" onClick={addSingle} disabled={(!vid && !aid) || !!clipError}>
               Download
             </button>
           </div>

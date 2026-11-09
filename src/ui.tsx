@@ -81,6 +81,13 @@ export function savePrefs(p: Prefs) {
   } catch {}
 }
 
+// "90", "1:30" or "1:02:03" to seconds. NaN when it is not a time.
+export function parseTime(t: string) {
+  const parts = t.trim().split(":");
+  if (parts.length > 3 || parts.some((p) => !/^\d+(\.\d+)?$/.test(p))) return NaN;
+  return parts.reduce((a, p) => a * 60 + Number(p), 0);
+}
+
 export const looksLikeLink = (s: string) => /^https?:\/\/[^\s/]+\.[^\s/]+/i.test(s);
 
 export const size = (b: number | null) =>
