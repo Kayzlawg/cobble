@@ -619,6 +619,39 @@ small {
   padding: 12px;
 }
 
+.icon[aria-expanded="true"] {
+  background: #272727;
+  color: var(--text);
+}
+
+.logbox {
+  position: relative;
+  margin-top: 6px;
+}
+
+.logbox .icon {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+}
+
+.log {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 40px 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--dim);
+  font: 12px/1.45 Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .icon {
   background: none;
   border: 0;

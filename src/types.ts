@@ -91,6 +91,10 @@ export type Job = {
   duration?: number | null;
   // Set when the job stops being live (done, failed or cancelled), in ms.
   endedAt?: number;
+  // Output lines from yt-dlp or ffmpeg while the job runs. Set when it starts, so only jobs that ran have one.
+  log?: string[];
+  // Whether the log panel is open. Set when a job fails, so the reason is on screen.
+  logOpen?: boolean;
 };
 
 export type NewJob = Pick<Job, "kind" | "title" | "label" | "est" | "req" | "creq" | "thumb" | "author" | "duration">;

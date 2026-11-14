@@ -1,9 +1,39 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Icon } from "./Icon";
 import { Thumb, clock, day, size, useLeave } from "./ui";
 import type { Job } from "./types";
 
 const isLive = (j: Job) => j.status === "queued" || j.status === "running" || j.status === "cancelling";
+
+// Keeps the newest line in view as output arrives. The copy button puts the whole log on the clipboard.
+function Log({ lines }: { lines: string[] }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [lines]);
+  const copy = async () => {
+    try {
+      await writeText(lines.join("\n"));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  };
+  return (
+    <div className="logbox">
+      <pre className="log" ref={ref}>
+        {lines.length ? lines.join("\n") : "No output yet."}
+      </pre>
+      {lines.length > 0 && (
+        <button className="icon" aria-label="Copy log" title="Copy log" onClick={copy}>
+          <Icon name={copied ? "circleCheck" : "copy"} size={15} />
+        </button>
+      )}
+    </div>
+  );
+}
 
 function status(j: Job) {
   const p = j.progress;
@@ -52,6 +82,7 @@ export default function Queue({
   onRemove,
   onRetry,
   onRunNext,
+  onToggleLog,
   onClear,
 }: {
   jobs: Job[];
@@ -60,6 +91,7 @@ export default function Queue({
   onRemove: (id: number) => void;
   onRetry: (id: number) => void;
   onRunNext: (id: number) => void;
+  onToggleLog: (id: number) => void;
   onClear: () => void;
 }) {
   const [leaving, leave] = useLeave();
@@ -95,6 +127,17 @@ export default function Queue({
       </div>
       <div className="acts">
         {!isLive(j) && j.endedAt && <small className="when">{day(j.endedAt)}</small>}
+        {j.log && (
+          <button
+            className="icon"
+            aria-label="Show log"
+            title={j.logOpen ? "Hide log" : "Show log"}
+            aria-expanded={!!j.logOpen}
+            onClick={() => onToggleLog(j.id)}
+          >
+            <Icon name="terminal" />
+          </button>
+        )}
         {(j.status === "running" || j.status === "cancelling") && (
           <button className="ghost" disabled={j.status === "cancelling"} onClick={() => onCancel(j.id)}>
             Cancel
@@ -124,6 +167,25 @@ export default function Queue({
     </div>
   );
 
+  // Jobs share one card. An open log ends the card, shows under its job as its own panel, and a new card carries on.
+  const section = (js: Job[]) => {
+    const out: ReactNode[] = [];
+    let cur: Job[] = [];
+    const flush = () => {
+      if (cur.length) out.push(<div className="list sec" key={`c${cur[0].id}`}>{cur.map(row)}</div>);
+      cur = [];
+    };
+    for (const j of js) {
+      cur.push(j);
+      if (j.log && j.logOpen) {
+        flush();
+        out.push(<Log key={`l${j.id}`} lines={j.log} />);
+      }
+    }
+    flush();
+    return out;
+  };
+
   return (
     <>
       <h1>Queue</h1>
@@ -138,7 +200,7 @@ export default function Queue({
               </button>
             )}
           </div>
-          <div className="list sec">{open.map(row)}</div>
+          {section(open)}
         </>
       )}
       {finished.length > 0 && (
@@ -149,7 +211,7 @@ export default function Queue({
               Clear finished
             </button>
           </div>
-          <div className="list sec">{finished.map(row)}</div>
+          {section(finished)}
         </>
       )}
     </>

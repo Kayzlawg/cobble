@@ -80,6 +80,8 @@ export default function App() {
       listen<Progress>("progress", (e) =>
         patchRunning((j) => (j.status === "cancelling" ? j : { ...j, progress: e.payload })),
       ),
+      // Keeps the newest 500 lines so a long job cannot grow the state without limit.
+      listen<string>("log", (e) => patchRunning((j) => ({ ...j, log: [...(j.log ?? []).slice(-499), e.payload] }))),
       listen<Entry>("done", (e) => {
         patchRunning((j) => ({ ...j, status: "done", entry: e.payload, progress: null, endedAt: Date.now() }));
         setHistory((h) => [e.payload, ...h]);
@@ -93,7 +95,7 @@ export default function App() {
         patchRunning((j) =>
           e.payload === "Cancelled"
             ? { ...j, status: "cancelled", progress: null, endedAt: Date.now() }
-            : { ...j, status: "failed", error: e.payload, progress: null, endedAt: Date.now() },
+            : { ...j, status: "failed", error: e.payload, progress: null, endedAt: Date.now(), logOpen: true },
         ),
       ),
     ];
@@ -145,7 +147,7 @@ export default function App() {
     if (jobs.some(live)) return;
     const next = jobs.find((j) => j.status === "queued");
     if (!next) return;
-    setJobs((js) => js.map((j) => (j.id === next.id ? { ...j, status: "running", progress: null } : j)));
+    setJobs((js) => js.map((j) => (j.id === next.id ? { ...j, status: "running", progress: null, log: [] } : j)));
     invoke(next.kind === "download" ? "start_download" : "start_compress", { req: next.kind === "download" ? next.req : next.creq }).catch(
       (e) => setJobs((js) => js.map((j) => (j.id === next.id ? { ...j, status: "failed", error: String(e), endedAt: Date.now() } : j))),
     );
@@ -153,10 +155,20 @@ export default function App() {
 
   function add(list: NewJob[]) {
     setJobs((js) => [...js, ...list.map((n) => ({ ...n, id: nextId.current++, status: "queued" as const, progress: null }))]);
-    setPage("queue");
+    // Stays on the current page so the next link can go in straight away.
+    toast(
+      {
+        icon: "list",
+        text: list.length > 1 ? `Added ${list.length} to queue` : "Added to queue",
+        action: { label: "View", run: () => setPage("queue") },
+      },
+      4000,
+    );
   }
 
-  const retry = (id: number) => setJobs((js) => js.map((j) => (j.id === id ? { ...j, status: "queued", error: undefined } : j)));
+  const retry = (id: number) =>
+    setJobs((js) => js.map((j) => (j.id === id ? { ...j, status: "queued", error: undefined, logOpen: false } : j)));
+  const toggleLog = (id: number) => setJobs((js) => js.map((j) => (j.id === id ? { ...j, logOpen: !j.logOpen } : j)));
   const clearFinished = () => setJobs((js) => js.filter((j) => j.status === "queued" || live(j)));
   // Shows "Cancelling" at once. The backend answers with a "failed: Cancelled" event once the process tree is gone.
   const cancel = (id: number) => {
@@ -198,10 +210,14 @@ export default function App() {
 
   async function update() {
     setUpdating(true);
-    const v = await invoke<string>("update_ytdlp");
-    setVersion(v);
+    try {
+      const v = await invoke<string>("update_ytdlp");
+      toast({ icon: "circleCheck", text: v === version ? "yt-dlp is up to date" : `yt-dlp updated to ${v}` });
+      setVersion(v);
+    } catch (e) {
+      toast({ icon: "alert", text: `Update failed: ${e}` }, 8000);
+    }
     setUpdating(false);
-    toast({ icon: "circleCheck", text: `yt-dlp updated to ${v}` });
   }
 
   const removeHistory = async (id: number) => setHistory(await invoke<Entry[]>("remove_history", { id }));
@@ -276,6 +292,7 @@ export default function App() {
             onCancelAll={cancelAll}
             onRemove={removeJob}
             onRetry={retry}
+            onToggleLog={toggleLog}
             onRunNext={runNext}
             onClear={clearFinished}
           />

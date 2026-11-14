@@ -4,10 +4,10 @@ use std::{
     cmp::Reverse,
     collections::BTreeMap,
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader},
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStderr, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -480,6 +480,19 @@ fn register(running: &Running, mut child: Child) {
     *running.child.lock().unwrap() = Some(child);
 }
 
+// Sends each stderr line to the UI as a "log" event. The full text is still returned for error messages.
+fn pipe_log(app: AppHandle, stderr: ChildStderr) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut all = String::new();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = app.emit("log", &line);
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    })
+}
+
 // Runs ffmpeg on `input` into `out`, reporting progress. Removes `out` if it fails or is cancelled.
 fn run_ffmpeg(
     app: &AppHandle,
@@ -490,6 +503,9 @@ fn run_ffmpeg(
     mid: &[&str],
     duration: Option<f64>,
 ) -> Result<(), String> {
+    // ffmpeg runs at error level, so a good run prints nothing. One line says what it is doing.
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let _ = app.emit("log", format!("[ffmpeg] {stage}: {} to {}", name(input), name(out)));
     let mut child = Command::new(bundled("ffmpeg"))
         .creation_flags(NO_WINDOW)
         .args(["-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-i"])
@@ -501,14 +517,10 @@ fn run_ffmpeg(
         .spawn()
         .map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     register(running, child);
 
-    let err = thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
-    });
+    let err = pipe_log(app.clone(), stderr);
     let total_us = duration.unwrap_or(0.0) * 1e6;
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<f64>().ok()) {
@@ -640,7 +652,9 @@ fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<
             "--print",
             "after_move:codecs|%(vcodec)s|%(acodec)s",
             "--print",
-            "after_move:filepath",
+            "after_move:file|%(filepath)s",
+            // --print implies --quiet, which hides the progress messages the log is for. They arrive on stdout.
+            "--no-quiet",
             "-o",
         ])
         .arg(dir.join(format!("{}.%(ext)s", out_name(req.template.as_deref()))))
@@ -650,14 +664,10 @@ fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<
         .spawn()
         .map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     register(running, child);
 
-    let err = thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
-    });
+    let err = pipe_log(app.clone(), stderr);
     let mut path = String::new();
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         let p: Vec<&str> = line.split('|').collect();
@@ -666,6 +676,8 @@ fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<
             let known = |c: &str| (c != "none" && c != "NA").then(|| c.to_string());
             req.vc = known(p[1]).map(|c| vfam(&c).to_string());
             req.ac = known(p[2]).map(|c| afam(&c).to_string());
+        } else if p[0] == "file" && p.len() == 2 {
+            path = p[1].trim().to_string();
         } else if p.len() == 5 {
             let n = |i: usize| p[i].trim().parse::<f64>().ok();
             let total = n(1).or(n(2)).unwrap_or(0.0);
@@ -675,7 +687,7 @@ fn run_download(app: &AppHandle, running: &Running, mut req: Request) -> Result<
                 Progress { stage: "download", percent, speed: n(3), eta: n(4).map(|e| e as u64) },
             );
         } else if !line.trim().is_empty() {
-            path = line.trim().to_string();
+            let _ = app.emit("log", &line);
         }
     }
     let status = running.child.lock().unwrap().take().and_then(|mut c| c.wait().ok());
@@ -915,12 +927,18 @@ async fn update_ytdlp(app: AppHandle) -> Result<String, String> {
     if !copy.exists() {
         fs::copy(bundled("yt-dlp"), &copy).map_err(|e| e.to_string())?;
     }
-    tauri::async_runtime::spawn_blocking(move || {
+    let out = tauri::async_runtime::spawn_blocking(move || {
         Command::new(&copy).creation_flags(NO_WINDOW).arg("-U").output()
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
+    // A failed update (offline, blocked) exits non-zero. Report it instead of claiming success.
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("Update failed");
+        return Err(line.trim_start_matches("ERROR:").trim().to_string());
+    }
     ytdlp_version(app).await
 }
 
